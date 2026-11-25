@@ -724,6 +724,7 @@ function frame(now) {
   const dt = lastFrame ? now - lastFrame : 16;
   lastFrame = now;
   if (Math.abs(cssW - stage.clientWidth) > 1 || Math.abs(cssH - stage.clientHeight) > 1) layout();
+  if (!busy) navFrame(now, dt);
   if (skyDirty && !busy) {
     R.renderSky(buildScene(mode !== 'view'));
     skyDirty = false;
@@ -850,14 +851,14 @@ vp.addEventListener('pointerup', e => {
   const h = pickAt(e);
   select(h ? h.object.userData.id : null);
 });
+// doppio clic: quel punto diventa il centro della vista (e il punto a fuoco)
 vp.addEventListener('dblclick', e => {
   if (mode !== 'view') return;
   const h = pickAt(e);
   if (!h) return;
-  S.camera.focus = Math.round(h.distance);
-  if (S.camera.blur === 0) S.camera.blur = 0.3;
-  toast('A fuoco a ' + fmtLen(h.distance));
-  resetTrace();
+  S.camera.focus = 0;
+  centerAnim = { from: orbit.target.clone(), to: h.point.clone(), t0: performance.now(), dur: 280 };
+  toast('Ora la vista gira attorno a questo punto');
   if (curTab === 'camera') renderTab();
 });
 vp.addEventListener('contextmenu', e => e.preventDefault());
@@ -874,11 +875,152 @@ function pickAt(e) {
   return hits.find(h => findObj(h.object.userData.id)?.type !== 'clouds') || hits[0] || null;
 }
 orbit.addEventListener('start', () => { dragging = true; });
-orbit.addEventListener('end', () => { dragging = false; resetTrace(); });
-orbit.addEventListener('change', () => { resetTrace(true); });
+orbit.addEventListener('end', () => { dragging = false; keepAboveGround(); orbit.update(); resetTrace(); });
+orbit.addEventListener('change', () => { showMarker(); resetTrace(true); });
 
-function frameSelection() {
-  const o = selId && findObj(selId);
+// ---------- navigazione: comandi a schermo, volo, viste rapide ----------
+orbit.zoomToCursor = true;
+const marker = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 8), new THREE.MeshBasicMaterial({ color: 0xf2b45a, depthTest: false, transparent: true, opacity: 0.9 }));
+marker.renderOrder = 999;
+marker.visible = false;
+scene3.add(marker);
+let markerUntil = 0, centerAnim = null;
+const fly = new Set();
+let flyFast = false, flyWasActive = false;
+function showMarker() { markerUntil = performance.now() + 900; }
+function keepAboveGround() {
+  const g = surfaceY(camera3.position.x, camera3.position.z) + 2;
+  if (camera3.position.y < g) camera3.position.y = g;
+}
+function camMoved(done) {
+  keepAboveGround();
+  orbit.update();
+  showMarker();
+  resetTrace(!done);
+}
+function camBasis() {
+  camera3.updateMatrixWorld();
+  const e = camera3.matrixWorld.elements;
+  return { right: new THREE.Vector3(e[0], e[1], e[2]), up: new THREE.Vector3(e[4], e[5], e[6]), fwd: new THREE.Vector3(-e[8], -e[9], -e[10]) };
+}
+function orbitBy(dx, dy) {
+  const off = camera3.position.clone().sub(orbit.target);
+  const sph = new THREE.Spherical().setFromVector3(off);
+  sph.theta -= dx * 0.008;
+  sph.phi = clamp(sph.phi - dy * 0.008, 0.02, Math.PI * 0.97);
+  off.setFromSpherical(sph);
+  camera3.position.copy(orbit.target).add(off);
+}
+function panBy(dx, dy) {
+  const k = camera3.position.distanceTo(orbit.target) * 0.002;
+  const b = camBasis();
+  const mv = b.right.multiplyScalar(-dx * k).add(b.up.multiplyScalar(dy * k));
+  camera3.position.add(mv); orbit.target.add(mv);
+}
+function dollyBy(dy) {
+  const off = camera3.position.clone().sub(orbit.target);
+  const d = clamp(off.length() * Math.exp(dy * 0.01), 1, 200000);
+  camera3.position.copy(orbit.target).add(off.setLength(d));
+}
+document.querySelectorAll('.nav-pad').forEach(pad => {
+  let px = 0, py = 0, on = false;
+  pad.addEventListener('pointerdown', e => {
+    if (mode !== 'view') return;
+    on = true; px = e.clientX; py = e.clientY; dragging = true;
+    pad.classList.add('on'); pad.setPointerCapture(e.pointerId);
+  });
+  pad.addEventListener('pointermove', e => {
+    if (!on) return;
+    const dx = e.clientX - px, dy = e.clientY - py;
+    px = e.clientX; py = e.clientY;
+    const k = pad.dataset.pad;
+    if (k === 'orbit') orbitBy(dx, dy); else if (k === 'pan') panBy(dx, dy); else dollyBy(dy);
+    camMoved(false);
+  });
+  const end = () => { if (!on) return; on = false; dragging = false; pad.classList.remove('on'); camMoved(true); };
+  pad.addEventListener('pointerup', end);
+  pad.addEventListener('pointercancel', end);
+});
+document.querySelectorAll('.nav-fly button').forEach(b => {
+  const k = b.dataset.fly;
+  const end = () => { fly.delete(k); b.classList.remove('on'); };
+  b.addEventListener('pointerdown', e => { if (mode !== 'view') return; fly.add(k); b.classList.add('on'); b.setPointerCapture(e.pointerId); });
+  b.addEventListener('pointerup', end);
+  b.addEventListener('pointercancel', end);
+  b.addEventListener('lostpointercapture', end);
+});
+const FLY_KEYS = { arrowup: 'fwd', arrowdown: 'back', arrowleft: 'left', arrowright: 'right', pageup: 'up', pagedown: 'down' };
+window.addEventListener('keyup', e => {
+  const k = FLY_KEYS[e.key.toLowerCase()];
+  if (k) fly.delete(k);
+  if (e.key === 'Shift') flyFast = false;
+});
+window.addEventListener('blur', () => fly.clear());
+function flyStep(dt) {
+  if (!fly.size) {
+    if (flyWasActive) { flyWasActive = false; dragging = false; camMoved(true); }
+    return;
+  }
+  flyWasActive = true; dragging = true;
+  const b = camBasis();
+  const fwd = new THREE.Vector3(b.fwd.x, 0, b.fwd.z);
+  if (fwd.lengthSq() < 1e-6) fwd.set(b.up.x, 0, b.up.z);
+  fwd.normalize();
+  const right = new THREE.Vector3(b.right.x, 0, b.right.z).normalize();
+  const above = Math.max(2, camera3.position.y - surfaceY(camera3.position.x, camera3.position.z));
+  const speed = clamp(above * 0.8 + camera3.position.distanceTo(orbit.target) * 0.15, 5, 20000) * (flyFast ? 3 : 1) * dt / 1000;
+  const mv = new THREE.Vector3();
+  if (fly.has('fwd')) mv.add(fwd); if (fly.has('back')) mv.sub(fwd);
+  if (fly.has('right')) mv.add(right); if (fly.has('left')) mv.sub(right);
+  if (fly.has('up')) mv.y += 1; if (fly.has('down')) mv.y -= 1;
+  if (mv.lengthSq() === 0) return;
+  mv.normalize().multiplyScalar(speed);
+  camera3.position.add(mv); orbit.target.add(mv);
+  camMoved(false);
+}
+function viewTop() {
+  const d = Math.max(500, camera3.position.distanceTo(orbit.target));
+  camera3.position.set(orbit.target.x, orbit.target.y + d, orbit.target.z + d * 0.01);
+  camMoved(true);
+}
+function viewGround() {
+  const b = camBasis();
+  const fwd = new THREE.Vector3(b.fwd.x, 0, b.fwd.z);
+  if (fwd.lengthSq() < 1e-6) fwd.set(b.up.x, 0, b.up.z);
+  fwd.normalize();
+  const p = camera3.position;
+  p.y = surfaceY(p.x, p.z) + 6;
+  const d = Math.max(300, Math.min(5000, orbit.target.distanceTo(p)));
+  orbit.target.set(p.x + fwd.x * d, p.y, p.z + fwd.z * d);
+  camMoved(true);
+}
+document.querySelectorAll('.nav-views button').forEach(b => b.addEventListener('click', () => {
+  if (mode !== 'view') return;
+  if (b.dataset.view === 'top') viewTop();
+  else if (b.dataset.view === 'ground') viewGround();
+  else frameSelection(true);
+}));
+function navFrame(now, dt) {
+  if (centerAnim) {
+    const k = Math.min(1, (now - centerAnim.t0) / centerAnim.dur);
+    const s = k * k * (3 - 2 * k);
+    orbit.target.lerpVectors(centerAnim.from, centerAnim.to, s);
+    orbit.update();
+    showMarker();
+    resetTrace(k < 1);
+    if (k >= 1) centerAnim = null;
+  }
+  if (mode === 'view') flyStep(Math.min(dt, 100));
+  const on = mode === 'view' && now < markerUntil;
+  marker.visible = on;
+  if (on) {
+    marker.position.copy(orbit.target);
+    marker.scale.setScalar(camera3.position.distanceTo(orbit.target) * 0.006);
+  }
+}
+
+function frameSelection(all) {
+  const o = !all && selId && findObj(selId);
   let center, radius;
   if (o && (o.type === 'terrain' || o.type === 'prim')) {
     const b = new THREE.Box3().setFromObject(nodes.get(o.id).mesh);
@@ -896,10 +1038,9 @@ function frameSelection() {
   const dist = radius / Math.sin(camera3.fov * DEG / 2) * 1.1;
   orbit.target.copy(center);
   camera3.position.copy(center).addScaledVector(dir, dist);
-  orbit.update();
-  resetTrace();
+  camMoved(true);
 }
-$('#btnFrame').addEventListener('click', frameSelection);
+$('#btnFrame').addEventListener('click', () => frameSelection(false));
 document.querySelectorAll('#gizmoModes button').forEach(b => b.addEventListener('click', () => setGizmo(b.dataset.gizmo)));
 document.querySelectorAll('#shadeModes button').forEach(b => b.addEventListener('click', () => setShading(b.dataset.shade)));
 
@@ -908,10 +1049,12 @@ window.addEventListener('keydown', e => {
   if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')) return;
   if (mode !== 'view') return;
   const k = e.key.toLowerCase();
+  if (e.key === 'Shift') flyFast = true;
+  if (FLY_KEYS[k]) { e.preventDefault(); fly.add(FLY_KEYS[k]); return; }
   if (k === 'w') setGizmo('translate');
   else if (k === 'e') setGizmo('rotate');
   else if (k === 'r' && !e.ctrlKey && !e.metaKey) setGizmo('scale');
-  else if (k === 'f') frameSelection();
+  else if (k === 'f') frameSelection(false);
   else if (k === 'escape') select(null);
   else if (k === 'delete' || k === 'backspace') { if (selId) { e.preventDefault(); deleteObj(selId); } }
   else if (k === 'd' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); if (selId) duplicateObj(selId); }
@@ -1169,12 +1312,32 @@ const TABS = {
     section(null, 'Le nuvole, l’acqua e il suolo sono oggetti: li aggiungi dalla barra «Crea» e li regoli selezionandoli.');
   },
   camera() {
-    const s = section('Obiettivo', 'Nella vista: sinistro ruota, destro sposta, rotella avvicina. Doppio clic su un punto per metterlo a fuoco.');
+    const s0 = section('Come muoversi', 'La vista gira sempre attorno a un centro (il pallino arancione che compare mentre ti muovi).');
+    s0.appendChild(el('div', 'legend', [
+      ['Trascina', 'gira attorno al centro'],
+      ['Tasto destro', 'sposta la vista (sul telefono: due dita)'],
+      ['Rotella', 'avvicina verso il punto indicato (sul telefono: pizzica)'],
+      ['Doppio clic', 'quel punto diventa il nuovo centro, e va a fuoco'],
+      ['Frecce', 'vola avanti, indietro e di lato'],
+      ['PagSu / PagGiù', 'sali e scendi (Maiusc: più veloce)'],
+      ['F', 'inquadra l’oggetto selezionato'],
+    ].map(([a, b]) => `<b>${a}</b><span>${b}</span>`).join('')));
+    s0.appendChild(el('p', 'hint', 'Gli stessi comandi sono nel riquadro in basso a destra della vista: trascina i pad o tieni premute le frecce.'));
+    const tg = el('label', 'ctl ctl-inline toggle');
+    tg.appendChild(el('span', 'ctl-name', 'Mostra i comandi a schermo'));
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = S.view.nav !== false;
+    cb.addEventListener('change', () => { S.view.nav = cb.checked; $('#nav').hidden = !cb.checked; saveState(); });
+    tg.appendChild(cb);
+    s0.appendChild(tg);
+    const s = section('Obiettivo');
     slider(s, 'Lunghezza focale', bind(S.camera, 'focal'), 12, 300, 1, v => { camera3.fov = 2 * Math.atan(12 / v) / DEG; camera3.updateProjectionMatrix(); resetTrace(); }, v => Math.round(v) + ' mm', { log: true });
     const row = el('div', 'row');
-    button(row, 'Inquadra tutto', () => { select(null); frameSelection(); });
+    button(row, 'Inquadra tutto', () => frameSelection(true));
+    button(row, 'Dall’alto', viewTop);
+    button(row, 'Rasoterra', viewGround);
     s.appendChild(row);
-    const s2 = section('Profondità di campo');
+    const s2 = section('Profondità di campo', 'Il fuoco è sul centro della vista: fai doppio clic su un punto per centrarlo e metterlo a fuoco.');
     slider(s2, 'Sfocatura', bind(S.camera, 'blur'), 0, 1, 0.01, onScene, v => v === 0 ? 'nessuna' : pct(v));
     slider(s2, 'Distanza di messa a fuoco', { get: () => Math.max(1, S.camera.focus), set: v => { S.camera.focus = v <= 1.5 ? 0 : v; } }, 1, 60000, 1, onScene,
       v => v <= 1.5 ? 'sul centro' : fmtLen(v), { log: true });
@@ -1320,6 +1483,7 @@ function loadScene(ns) {
     orbit.update();
   }
   selId = null; tc.detach();
+  $('#nav').hidden = S.view.nav === false;
   layersDirty = true; skyDirty = true;
   layout();
   setShading(S.view.shading);

@@ -56,6 +56,28 @@
       <button type="button" class="vbtn" id="btnFrame" title="Inquadra l'oggetto selezionato (F)"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/><circle cx="12" cy="12" r="3"/></svg></button>
     </div>
 
+    <div class="nav" id="nav">
+      <div class="nav-pads">
+        <div class="nav-pad" data-pad="orbit" title="Trascina: giri attorno al centro della vista"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/></svg><span>Gira</span></div>
+        <div class="nav-pad" data-pad="pan" title="Trascina: ti sposti di lato, in alto e in basso"><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"/></svg><span>Sposta</span></div>
+        <div class="nav-pad" data-pad="zoom" title="Trascina in su per avvicinarti, in giù per allontanarti"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5M11 8v6M8 11h6"/></svg><span>Avvicina</span></div>
+      </div>
+      <div class="nav-fly" title="Tieni premuto per volare (anche frecce e PagSu/PagGiù della tastiera)">
+        <button type="button" data-fly="up" class="f-up" aria-label="Sali"><svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button>
+        <button type="button" data-fly="fwd" class="f-fwd" aria-label="Avanti"><svg viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></button>
+        <button type="button" data-fly="left" class="f-left" aria-label="Sinistra"><svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg></button>
+        <span class="f-mid">Vola</span>
+        <button type="button" data-fly="right" class="f-right" aria-label="Destra"><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></button>
+        <button type="button" data-fly="back" class="f-back" aria-label="Indietro"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
+        <button type="button" data-fly="down" class="f-down" aria-label="Scendi"><svg viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></svg></button>
+      </div>
+      <div class="nav-views">
+        <button type="button" data-view="top" title="Guarda dall'alto">Dall'alto</button>
+        <button type="button" data-view="ground" title="Porta la camera rasoterra, con lo sguardo dritto">Rasoterra</button>
+        <button type="button" data-view="all" title="Inquadra tutta la scena">Tutto</button>
+      </div>
+    </div>
+
     <div class="busy" id="busy" hidden><span class="spin"></span><span id="busy-text">Genero il terreno…</span></div>
     <div class="renderbar" id="renderbar" hidden>
       <div class="rb-track"><div class="rb-fill" id="rb-fill"></div></div>
@@ -68,7 +90,7 @@
       </div>
     </div>
     <div class="toast" id="toast"></div>
-    <div class="help" id="help">Sinistro: ruota · Destro: sposta · Rotella: zoom · Clic: seleziona · W E R: sposta, ruota, scala</div>
+    <div class="help" id="help">Trascina: gira · Tasto destro: sposta · Rotella: avvicina · Doppio clic: centra lì · Frecce: vola</div>
   </div>
 
   <aside class="panel">
