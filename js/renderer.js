@@ -39,7 +39,8 @@ class Renderer {
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     for (const w of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, w, gl.REPEAT);
 
-    this.heightTex = null; this.normalTex = null;
+    this.heightArr = null; this.flowArr = null; this.terN = 0;
+    this.allocTerrains(2);
     this.dummyTex = this.texture2D(gl.RGBA32F, 1, 1, gl.RGBA, gl.FLOAT, new Float32Array(4), gl.NEAREST, gl.CLAMP_TO_EDGE, gl.CLAMP_TO_EDGE);
     this.uloc = new Map();
   }
@@ -93,17 +94,49 @@ class Renderer {
     return m.get(name);
   }
 
-  setTerrain(t, normalBytes) {
+  // texture array per le mappe di altezza (R16F) e i canali d'acqua (R8), un layer per terreno
+  allocTerrains(N) {
     const gl = this.gl;
-    if (this.heightTex) gl.deleteTexture(this.heightTex);
-    if (this.normalTex) gl.deleteTexture(this.normalTex);
-    this.heightTex = this.texture2D(gl.R16F, t.N, t.N, gl.RED, gl.FLOAT, t.h, gl.LINEAR, gl.CLAMP_TO_EDGE, gl.CLAMP_TO_EDGE);
-    this.normalTex = this.texture2D(gl.RGBA8, t.N, t.N, gl.RGBA, gl.UNSIGNED_BYTE, normalBytes, gl.LINEAR, gl.CLAMP_TO_EDGE, gl.CLAMP_TO_EDGE);
+    if (this.terN === N) return;
+    if (this.heightArr) { gl.deleteTexture(this.heightArr); gl.deleteTexture(this.flowArr); }
+    const mk = (ifmt, fmt, type) => {
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, t);
+      gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, ifmt, N, N, MAX_TER, 0, fmt, type, null);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      return t;
+    };
+    this.heightArr = mk(gl.R16F, gl.RED, gl.HALF_FLOAT);
+    this.flowArr = mk(gl.R8, gl.RED, gl.UNSIGNED_BYTE);
+    this.terN = N;
   }
-  updateNormals(N, normalBytes) {
+  uploadTerrain(layer, t) {
     const gl = this.gl;
-    gl.bindTexture(gl.TEXTURE_2D, this.normalTex);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, N, N, gl.RGBA, gl.UNSIGNED_BYTE, normalBytes);
+    this.allocTerrains(t.N);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.heightArr);
+    gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, layer, t.N, t.N, 1, gl.RED, gl.FLOAT, t.h);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.flowArr);
+    gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, layer, t.N, t.N, 1, gl.RED, gl.UNSIGNED_BYTE, t.flowBytes);
+  }
+
+  // cielo gia' esposto e tonemappato, come immagine equirettangolare per lo sfondo della vista 3D
+  skyImage(disp) {
+    const gl = this.gl;
+    const w = this.skyW, h = this.skyH;
+    const tex = this.texture2D(gl.RGBA8, w, h, gl.RGBA, gl.UNSIGNED_BYTE, null, gl.NEAREST, gl.CLAMP_TO_EDGE, gl.CLAMP_TO_EDGE);
+    const target = { fbo: this.fbo(tex), w, h };
+    this.show({ bufs: [{ tex: this.skyTex }], cur: 0, sky: true }, { x: 0, y: 0, w, h }, Object.assign({}, disp, { vignette: 0 }), target);
+    const px = new Uint8Array(w * h * 4);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    gl.deleteFramebuffer(target.fbo); gl.deleteTexture(tex);
+    const img = new ImageData(w, h);
+    const row = w * 4;
+    for (let y = 0; y < h; y++) img.data.set(px.subarray((h - 1 - y) * row, (h - y) * row), y * row);
+    return img;
   }
 
   renderSky(sc) {
@@ -162,8 +195,19 @@ class Renderer {
     gl.uniform1f(u('uAspect'), w / h);
     gl.uniform1f(u('uAperture'), sc.cam.aperture);
     gl.uniform1f(u('uFocus'), sc.cam.focus);
-    gl.uniform1f(u('uTSize'), sc.tSize);
-    gl.uniform1f(u('uTHeight'), sc.tHeight);
+    gl.uniform1i(u('uStyle'), sc.style);
+    gl.uniform1i(u('uTerCount'), sc.terCount);
+    gl.uniform4fv(u('uTerPos'), sc.terPos);
+    gl.uniform4fv(u('uTerSize'), sc.terSize);
+    gl.uniform3fv(u('uTerLow'), sc.terLow);
+    gl.uniform3fv(u('uTerMid'), sc.terMid);
+    gl.uniform3fv(u('uTerRock'), sc.terRock);
+    gl.uniform3fv(u('uTerSnow'), sc.terSnow);
+    gl.uniform3fv(u('uTerSand'), sc.terSand);
+    gl.uniform2fv(u('uTerMat'), sc.terMat);
+    gl.uniform1i(u('uGroundOn'), sc.groundOn ? 1 : 0);
+    gl.uniform1f(u('uGroundY'), sc.groundY);
+    gl.uniform3fv(u('uGroundColor'), sc.groundColor);
     gl.uniform1i(u('uWaterOn'), sc.waterOn ? 1 : 0);
     gl.uniform1f(u('uWaterLevel'), sc.waterLevel);
     gl.uniform1f(u('uWaterClarity'), sc.waterClarity);
@@ -183,17 +227,12 @@ class Renderer {
     gl.uniform1i(u('uCloudSteps'), q.cloudSteps);
     gl.uniform1i(u('uBounces'), q.bounces);
     gl.uniform1i(u('uTerrainSteps'), q.terrainSteps);
-    gl.uniform3fv(u('uColLow'), sc.pal.low);
-    gl.uniform3fv(u('uColMid'), sc.pal.mid);
-    gl.uniform3fv(u('uColRock'), sc.pal.rock);
-    gl.uniform3fv(u('uColSnow'), sc.pal.snow);
-    gl.uniform3fv(u('uColSand'), sc.pal.sand);
-    gl.uniform1f(u('uSnowLine'), sc.pal.snowLine);
-    gl.uniform1f(u('uRockSlope'), sc.pal.rockSlope);
     gl.uniform1i(u('uObjCount'), sc.objCount);
-    gl.uniform4fv(u('uObjA'), sc.objA);
-    gl.uniform4fv(u('uObjB'), sc.objB);
-    gl.uniform4fv(u('uObjC'), sc.objC);
+    gl.uniform4fv(u('uObjPos'), sc.objPos);
+    gl.uniform4fv(u('uObjScale'), sc.objScale);
+    gl.uniformMatrix3fv(u('uObjRot'), false, sc.objRot);
+    gl.uniform4fv(u('uObjMat'), sc.objMat);
+    gl.uniform1fv(u('uObjEmit'), sc.objEmit);
   }
 
   bindTraceTextures(prevTex) {
@@ -203,8 +242,8 @@ class Renderer {
       gl.bindTexture(target, tex);
       gl.uniform1i(this.u(p, name), unit);
     };
-    bind(0, gl.TEXTURE_2D, this.heightTex, 'uHeight');
-    bind(1, gl.TEXTURE_2D, this.normalTex, 'uNormal');
+    bind(0, gl.TEXTURE_2D_ARRAY, this.heightArr, 'uHeights');
+    bind(1, gl.TEXTURE_2D_ARRAY, this.flowArr, 'uFlows');
     bind(2, gl.TEXTURE_3D, this.noiseTex, 'uNoise');
     bind(3, gl.TEXTURE_2D, this.skyTex, 'uSky');
     bind(4, gl.TEXTURE_2D, prevTex || this.dummyTex, 'uPrev');

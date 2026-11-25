@@ -64,34 +64,52 @@ void main(){
   outColor = vec4(col, 1.0);
 }`;
 
+const MAX_TER = 4, MAX_OBJ = 8;
+
 const FS_TRACE = `#version 300 es
 precision highp float;
 precision highp int;
 precision highp sampler3D;
+precision highp sampler2DArray;
+
+#define MAX_TER ${MAX_TER}
+#define MAX_OBJ ${MAX_OBJ}
 
 uniform vec2 uRes;
 uniform int uFrame;
+uniform int uStyle;          // 0 fotorealistico, 1 classico, 2 illustrato
 uniform vec3 uCamPos, uCamRight, uCamUp, uCamFwd;
 uniform float uTanHalf, uAspect, uAperture, uFocus;
-uniform sampler2D uHeight;
-uniform sampler2D uNormal;
+uniform sampler2DArray uHeights;   // R: altezza 0..1
+uniform sampler2DArray uFlows;     // R: canali d'acqua dell'erosione
 uniform sampler3D uNoise;
 uniform sampler2D uSky;
-uniform float uTSize, uTHeight;
+// terreni
+uniform int uTerCount;
+uniform vec4 uTerPos[MAX_TER];     // x, y base, z, rotazione Y
+uniform vec4 uTerSize[MAX_TER];    // larghezza, altezza, profondita', layer
+uniform vec3 uTerLow[MAX_TER], uTerMid[MAX_TER], uTerRock[MAX_TER], uTerSnow[MAX_TER], uTerSand[MAX_TER];
+uniform vec2 uTerMat[MAX_TER];     // quota neve, pendenza roccia
+// piani infiniti
+uniform int uGroundOn;
+uniform float uGroundY;
+uniform vec3 uGroundColor;
 uniform int uWaterOn;
 uniform float uWaterLevel, uWaterClarity, uWaves;
 uniform vec3 uWaterColor;
+uniform float uCloudCover, uCloudDensity, uCloudBottom, uCloudTop, uCloudScale;
+// luce e aria
 uniform vec3 uSunDir, uSunColor;
 uniform float uSunSize;
 uniform float uFogDensity, uFogFalloff, uSkyLight;
-uniform float uCloudCover, uCloudDensity, uCloudBottom, uCloudTop, uCloudScale;
 uniform int uCloudSteps, uBounces, uTerrainSteps;
-uniform vec3 uColLow, uColMid, uColRock, uColSnow, uColSand;
-uniform float uSnowLine, uRockSlope;
+// oggetti
 uniform int uObjCount;
-uniform vec4 uObjA[8];   // centro xyz, dimensione
-uniform vec4 uObjB[8];   // forma, materiale, ruvidita', rotazione Y
-uniform vec4 uObjC[8];   // colore rgb, emissione
+uniform vec4 uObjPos[MAX_OBJ];     // centro, forma
+uniform vec4 uObjScale[MAX_OBJ];   // semiassi, materiale
+uniform mat3 uObjRot[MAX_OBJ];     // mondo -> locale
+uniform vec4 uObjMat[MAX_OBJ];     // colore, ruvidita'
+uniform float uObjEmit[MAX_OBJ];
 uniform int uUsePrev;
 uniform sampler2D uPrev;
 
@@ -139,55 +157,59 @@ vec3 skyRadiance(vec3 d, bool withSun){
     float cr = cos(uSunSize);
     float ca = dot(d, uSunDir);
     if (ca > cr){
-      float limb = 1.0 - 0.6*(1.0 - sqrt(max(0.0, 1.0 - pow((1.0 - ca)/(1.0 - cr), 1.0))));
+      float limb = 1.0 - 0.6*(1.0 - sqrt(max(0.0, 1.0 - (1.0 - ca)/(1.0 - cr))));
       c += uSunColor * limb / (2.0*PI*(1.0 - cr));
     }
   }
   return c;
 }
 
-// ---------- terreno ----------
-float terrainH(vec2 xz){
-  vec2 uv = xz / uTSize + 0.5;
-  float h = texture(uHeight, uv).r * uTHeight;
-  // dettaglio procedurale sopra la mappa di altezza (spigoli e rugosita' da vicino)
-  float m = smoothstep(0.0, 0.06*uTHeight, h);
-  h += ((texture(uNoise, vec3(xz*0.0011, 0.37)).r - 0.5)*0.03
-      + (texture(uNoise, vec3(xz*0.0047, 0.81)).g - 0.5)*0.01) * uTHeight * m;
+// ---------- terreni (spazio locale: origine al centro della base, ruotato in Y) ----------
+float terH(int i, vec2 q){
+  vec4 S = uTerSize[i];
+  vec2 uv = q / S.xz + 0.5;
+  float h = texture(uHeights, vec3(uv, S.w)).r * S.y;
+  float m = smoothstep(0.0, 0.06*S.y, h);
+  float f = 1.0 / max(S.x, S.z);
+  h += ((texture(uNoise, vec3(q*f*17.6, 0.37)).r - 0.5)*0.03
+      + (texture(uNoise, vec3(q*f*75.0, 0.81)).g - 0.5)*0.01) * S.y * m;
   return h;
 }
-vec3 terrainNormal(vec2 xz, float t){
-  float e = max(3.0, t*0.0012);
-  float hx = terrainH(xz + vec2(e, 0.0)) - terrainH(xz - vec2(e, 0.0));
-  float hz = terrainH(xz + vec2(0.0, e)) - terrainH(xz - vec2(0.0, e));
+vec3 terNormalLocal(int i, vec2 q, float t){
+  float e = max(0.5, t*0.0012);
+  float hx = terH(i, q + vec2(e, 0.0)) - terH(i, q - vec2(e, 0.0));
+  float hz = terH(i, q + vec2(0.0, e)) - terH(i, q - vec2(0.0, e));
   return normalize(vec3(-hx, 2.0*e, -hz));
 }
-bool traceTerrain(vec3 ro, vec3 rd, float tmax, int steps, float k, out float tHit){
-  vec3 bmin = vec3(-0.5*uTSize, -1.0, -0.5*uTSize);
-  vec3 bmax = vec3(0.5*uTSize, uTHeight*1.03 + 1.0, 0.5*uTSize);
-  vec3 inv = 1.0 / rd;
-  vec3 t0 = (bmin - ro)*inv, t1 = (bmax - ro)*inv;
+bool traceTer(int i, vec3 ro, vec3 rd, float tmax, int steps, float k, out float tHit){
+  vec4 P = uTerPos[i], S = uTerSize[i];
+  vec3 lo = rotY(ro - P.xyz, -P.w), ld = rotY(rd, -P.w);
+  vec3 bmin = vec3(-0.5*S.x, -1.0, -0.5*S.z);
+  vec3 bmax = vec3(0.5*S.x, S.y*1.03 + 1.0, 0.5*S.z);
+  vec3 inv = 1.0 / ld;
+  vec3 t0 = (bmin - lo)*inv, t1 = (bmax - lo)*inv;
   vec3 tmn = min(t0, t1), tmx = max(t0, t1);
   float ta = max(max(tmn.x, tmn.y), max(tmn.z, 0.0));
   float tb = min(min(tmx.x, tmx.y), min(tmx.z, tmax));
   if (ta >= tb) return false;
   float t = ta;
-  vec3 p = ro + rd*t;
-  float d = p.y - terrainH(p.xz);
+  vec3 p = lo + ld*t;
+  float d = p.y - terH(i, p.xz);
   if (d < 0.0 && ta > 0.0) { tHit = t; return true; }
-  for (int i = 0; i < 700; i++){
-    if (i >= steps) break;
+  float minStep = max(0.05, 0.0004*max(S.x, S.z));
+  for (int s = 0; s < 700; s++){
+    if (s >= steps) break;
     float tp = t;
-    t += max(d*k, 0.4 + t*0.0012);
+    t += max(d*k, minStep + t*0.0012);
     if (t > tb) return false;
-    p = ro + rd*t;
-    d = p.y - terrainH(p.xz);
+    p = lo + ld*t;
+    d = p.y - terH(i, p.xz);
     if (d < 0.0){
       float a = tp, b = t;
       for (int j = 0; j < 7; j++){
         float m = 0.5*(a + b);
-        vec3 q = ro + rd*m;
-        if (q.y - terrainH(q.xz) < 0.0) b = m; else a = m;
+        vec3 q = lo + ld*m;
+        if (q.y - terH(i, q.xz) < 0.0) b = m; else a = m;
       }
       tHit = b; return true;
     }
@@ -195,78 +217,81 @@ bool traceTerrain(vec3 ro, vec3 rd, float tmax, int steps, float k, out float tH
   return false;
 }
 
-// ---------- oggetti ----------
-// restituisce t piu' vicino > eps e la normale esterna
-bool hitObject(int i, vec3 ro, vec3 rd, float eps, out float tOut, out vec3 nOut){
-  vec3 c = uObjA[i].xyz; float r = uObjA[i].w;
-  int shape = int(uObjB[i].x + 0.5);
+// ---------- oggetti (spazio locale unitario) ----------
+bool hitObject(int i, vec3 ro, vec3 rd, out float tOut, out vec3 nOut){
+  vec3 s = uObjScale[i].xyz;
+  mat3 M = uObjRot[i];
+  vec3 lo = (M * (ro - uObjPos[i].xyz)) / s;
+  vec3 ld = (M * rd) / s;
+  float eps = 0.001 * min(s.x, min(s.y, s.z));
+  int shape = int(uObjPos[i].w + 0.5);
+  float t = INF; vec3 nl = vec3(0);
   if (shape == 0){
-    vec3 oc = ro - c; float b = dot(oc, rd), cc = dot(oc, oc) - r*r, h = b*b - cc;
+    float a = dot(ld, ld), b = dot(lo, ld), c = dot(lo, lo) - 1.0, h = b*b - a*c;
     if (h < 0.0) return false;
     h = sqrt(h);
-    float t = -b - h; if (t < eps) t = -b + h; if (t < eps) return false;
-    tOut = t; nOut = (ro + rd*t - c) / r; return true;
-  }
-  float ang = uObjB[i].w;
-  vec3 lo = rotY(ro - c, -ang), ld = rotY(rd, -ang);
-  if (shape == 1){
+    t = (-b - h) / a; if (t < eps) t = (-b + h) / a; if (t < eps) return false;
+    nl = lo + ld*t;
+  } else if (shape == 1){
     vec3 inv = 1.0 / ld;
-    vec3 t0 = (-vec3(r) - lo)*inv, t1 = (vec3(r) - lo)*inv;
+    vec3 t0 = (-vec3(1.0) - lo)*inv, t1 = (vec3(1.0) - lo)*inv;
     vec3 tmn = min(t0, t1), tmx = max(t0, t1);
     float tn = max(max(tmn.x, tmn.y), tmn.z), tf = min(min(tmx.x, tmx.y), tmx.z);
     if (tn > tf) return false;
-    float t; vec3 nl;
     if (tn > eps){ t = tn; nl = -sign(ld) * step(tmn.yzx, tmn) * step(tmn.zxy, tmn); }
     else if (tf > eps){ t = tf; nl = sign(ld) * step(tmx, tmx.yzx) * step(tmx, tmx.zxy); }
     else return false;
-    tOut = t; nOut = rotY(nl, ang); return true;
-  }
-  // cilindro verticale (raggio r, mezza altezza r)
-  float best = INF; vec3 bn = vec3(0);
-  float a = dot(ld.xz, ld.xz);
-  if (a > 1e-8){
-    float b = dot(lo.xz, ld.xz), cc = dot(lo.xz, lo.xz) - r*r, h = b*b - a*cc;
-    if (h >= 0.0){
-      h = sqrt(h);
-      for (int s = 0; s < 2; s++){
-        float t = (-b + (s == 0 ? -h : h)) / a;
-        float y = lo.y + ld.y*t;
-        if (t > eps && t < best && abs(y) <= r){ best = t; bn = vec3((lo.xz + ld.xz*t).x, 0.0, (lo.xz + ld.xz*t).y) / r; }
+  } else {
+    float a = dot(ld.xz, ld.xz);
+    if (a > 1e-12){
+      float b = dot(lo.xz, ld.xz), c = dot(lo.xz, lo.xz) - 1.0, h = b*b - a*c;
+      if (h >= 0.0){
+        h = sqrt(h);
+        for (int k = 0; k < 2; k++){
+          float tt = (-b + (k == 0 ? -h : h)) / a;
+          float y = lo.y + ld.y*tt;
+          if (tt > eps && tt < t && abs(y) <= 1.0){ t = tt; vec2 q = lo.xz + ld.xz*tt; nl = vec3(q.x, 0.0, q.y); }
+        }
       }
     }
-  }
-  if (abs(ld.y) > 1e-8){
-    for (int s = 0; s < 2; s++){
-      float yc = s == 0 ? r : -r;
-      float t = (yc - lo.y) / ld.y;
-      vec2 q = lo.xz + ld.xz*t;
-      if (t > eps && t < best && dot(q, q) <= r*r){ best = t; bn = vec3(0.0, s == 0 ? 1.0 : -1.0, 0.0); }
+    if (abs(ld.y) > 1e-12){
+      for (int k = 0; k < 2; k++){
+        float yc = k == 0 ? 1.0 : -1.0;
+        float tt = (yc - lo.y) / ld.y;
+        vec2 q = lo.xz + ld.xz*tt;
+        if (tt > eps && tt < t && dot(q, q) <= 1.0){ t = tt; nl = vec3(0.0, yc, 0.0); }
+      }
     }
+    if (t >= INF) return false;
   }
-  if (best >= INF) return false;
-  tOut = best; nOut = rotY(bn, ang); return true;
+  tOut = t;
+  nOut = normalize((nl / s) * M);
+  return true;
 }
 
 // ---------- scena ----------
-// id: 0 cielo, 1 terreno, 2 piano infinito, 3 acqua, 10+i oggetti
-struct Hit { float t; vec3 n; int id; };
+// id: 0 cielo, 1 terreno, 2 suolo, 3 acqua, 10+i oggetti
+struct Hit { float t; vec3 n; int id; int sub; };
 
-Hit traceScene(vec3 ro, vec3 rd, int steps, bool useWater){
-  Hit h; h.t = INF; h.id = 0; h.n = vec3(0,1,0);
+Hit traceScene(vec3 ro, vec3 rd, int steps){
+  Hit h; h.t = INF; h.id = 0; h.sub = 0; h.n = vec3(0,1,0);
   float t;
-  if (traceTerrain(ro, rd, INF, steps, 0.45, t)){ h.t = t; h.id = 1; }
-  if (rd.y < 0.0 && ro.y > 0.0){
-    t = -ro.y / rd.y;
+  for (int i = 0; i < MAX_TER; i++){
+    if (i >= uTerCount) break;
+    if (traceTer(i, ro, rd, h.t, steps, 0.45, t) && t < h.t){ h.t = t; h.id = 1; h.sub = i; }
+  }
+  if (uGroundOn == 1 && rd.y < 0.0 && ro.y > uGroundY){
+    t = (uGroundY - ro.y) / rd.y;
     if (t < h.t - 0.01){ h.t = t; h.id = 2; h.n = vec3(0,1,0); }
   }
-  if (useWater && uWaterOn == 1){
+  if (uWaterOn == 1){
     t = (uWaterLevel - ro.y) / rd.y;
     if (t > 0.0 && t < h.t){ h.t = t; h.id = 3; h.n = vec3(0, ro.y > uWaterLevel ? 1.0 : -1.0, 0); }
   }
-  for (int i = 0; i < 8; i++){
+  for (int i = 0; i < MAX_OBJ; i++){
     if (i >= uObjCount) break;
     vec3 n;
-    if (hitObject(i, ro, rd, 0.001*uObjA[i].w, t, n) && t < h.t){ h.t = t; h.n = n; h.id = 10 + i; }
+    if (hitObject(i, ro, rd, t, n) && t < h.t){ h.t = t; h.n = n; h.id = 10 + i; }
   }
   return h;
 }
@@ -328,7 +353,8 @@ vec4 clouds(vec3 ro, vec3 rd, float tMax){
       for (int j = 0; j < 6; j++){ lp += uSunDir*ls; od += cloudDens(lp, j < 2) * sig * ls; ls *= 1.7; }
       float hN = clamp((p.y - uCloudBottom) / th, 0.0, 1.0);
       float powder = 1.0 - exp(-d*4.0);
-      vec3 sunL = uSunColor * (exp(-od)*0.75 + exp(-od*0.22)*0.25) * ph * mix(0.6, 1.0, powder) * 4.0*PI * 0.25;
+      vec3 sunL = uSunColor * (exp(-od)*0.75 + exp(-od*0.22)*0.25) * ph * mix(0.6, 1.0, powder) * PI;
+      if (uStyle == 2) sunL = uSunColor * (od < 1.5 ? 0.35 : 0.08);
       vec3 amb = mix(ambBot, ambTop, hN);
       vec3 S = (sunL + amb) * s;
       float Ts = exp(-s*dt);
@@ -384,60 +410,82 @@ vec3 waterSigma(){
 // tipo: 0 diffuso, 1 metallo, 2 vetro, 3 luce
 struct Surf { vec3 albedo; vec3 n; int type; float rough; vec3 emit; };
 
-Surf terrainSurf(vec3 p, bool ground, float dist){
-  Surf s; s.type = 0; s.rough = 1.0; s.emit = vec3(0);
-  vec3 n = vec3(0,1,0); float flow = 0.0;
-  if (!ground){
-    flow = texture(uNormal, p.xz / uTSize + 0.5).a;
-    n = terrainNormal(p.xz, dist);
+Surf groundSurf(vec3 p){
+  Surf s; s.type = 0; s.rough = 1.0; s.emit = vec3(0); s.n = vec3(0,1,0);
+  float n1 = texture(uNoise, p*0.00055).r, n2 = texture(uNoise, p*0.0031).g, n3 = texture(uNoise, p*0.019).r;
+  s.albedo = clamp(uGroundColor * (0.7 + 0.35*n1 + 0.25*n2) * (0.9 + 0.2*n3), 0.0, 0.95);
+  if (uStyle != 2){
+    vec4 nn = texture(uNoise, p*0.021);
+    s.n = normalize(vec3(0,1,0) + vec3(nn.r - 0.5, 0.0, nn.b - 0.45)*0.25);
   }
+  return s;
+}
+
+Surf terrainSurf(int i, vec3 p, float dist){
+  Surf s; s.type = 0; s.rough = 1.0; s.emit = vec3(0);
+  vec4 P = uTerPos[i], S = uTerSize[i];
+  vec3 q = rotY(p - P.xyz, -P.w);
+  float flow = texture(uFlows, vec3(q.xz / S.xz + 0.5, S.w)).r;
+  vec3 n = rotY(terNormalLocal(i, q.xz, dist), P.w);
   float n1 = texture(uNoise, p*0.00055).r;
   float n2 = texture(uNoise, p*0.0031).g;
   float n3 = texture(uNoise, p*0.019).r;
   float n4 = texture(uNoise, p*vec3(0.012, 0.004, 0.012)).b;
-  float hN = p.y / uTHeight;
+  float hN = q.y / S.y;
   float slope = 1.0 - n.y;
-  vec3 col = mix(uColLow, uColMid, smoothstep(0.08, 0.55, hN + (n1 - 0.5)*0.35));
+  vec3 col = mix(uTerLow[i], uTerMid[i], smoothstep(0.08, 0.55, hN + (n1 - 0.5)*0.35));
   col *= 0.78 + 0.42*n2;
-  col = mix(col, col*0.6 + uColSand*0.25, flow*0.6);
-  float rockAmt = smoothstep(uRockSlope - 0.07, uRockSlope + 0.07, slope + (n2 - 0.5)*0.18);
-  vec3 rock = uColRock * (0.65 + 0.55*n3) * (0.8 + 0.4*n1);
+  col = mix(col, col*0.6 + uTerSand[i]*0.25, flow*0.6);
+  float rs = uTerMat[i].y;
+  float rockAmt = smoothstep(rs - 0.07, rs + 0.07, slope + (n2 - 0.5)*0.18);
+  vec3 rock = uTerRock[i] * (0.65 + 0.55*n3) * (0.8 + 0.4*n1);
   rock *= 0.9 + 0.1*sin(p.y*0.035 + n1*9.0 + n4*5.0);
   col = mix(col, rock, rockAmt);
   if (uWaterOn == 1){
     float sb = 1.0 - smoothstep(uWaterLevel + 2.0, uWaterLevel + 12.0 + n2*25.0, p.y);
-    col = mix(col, uColSand*(0.85 + 0.3*n3), sb*(1.0 - rockAmt*0.6));
+    col = mix(col, uTerSand[i]*(0.85 + 0.3*n3), sb*(1.0 - rockAmt*0.6));
   }
-  float snow = smoothstep(uSnowLine - 0.025, uSnowLine + 0.025, hN + (n1 - 0.5)*0.12 - slope*0.45 + flow*0.05);
-  col = mix(col, uColSnow * (0.92 + 0.08*n3), snow);
-  vec4 nn = texture(uNoise, p*0.021);
-  float bump = mix(0.25, 0.75, rockAmt) * (1.0 - snow*0.6);
-  n = normalize(n + (nn.rgb - vec3(0.5, 0.5, 0.45))*vec3(1.0, 0.0, 1.0)*bump);
+  float snow = smoothstep(uTerMat[i].x - 0.025, uTerMat[i].x + 0.025, hN + (n1 - 0.5)*0.12 - slope*0.45 + flow*0.05);
+  col = mix(col, uTerSnow[i] * (0.92 + 0.08*n3), snow);
+  if (uStyle != 2){
+    vec4 nn = texture(uNoise, p*0.021);
+    float bump = mix(0.25, 0.75, rockAmt) * (1.0 - snow*0.6);
+    n = normalize(n + (nn.rgb - vec3(0.5, 0.5, 0.45))*vec3(1.0, 0.0, 1.0)*bump);
+  }
   s.albedo = clamp(col, 0.0, 0.95);
   s.n = n;
   return s;
 }
 
 Surf objectSurf(int i, vec3 n){
-  Surf s; s.n = n; s.albedo = uObjC[i].rgb; s.rough = uObjB[i].z; s.emit = vec3(0);
-  int m = int(uObjB[i].y + 0.5);
+  Surf s; s.n = n; s.albedo = uObjMat[i].rgb; s.rough = uObjMat[i].w; s.emit = vec3(0);
+  int m = int(uObjScale[i].w + 0.5);
   s.type = m;
-  if (m == 3) s.emit = uObjC[i].rgb * uObjC[i].w;
+  if (m == 3) s.emit = uObjMat[i].rgb * uObjEmit[i];
   return s;
 }
 
 bool shadowed(vec3 p, vec3 L, out vec3 tint){
   tint = vec3(1);
   float t;
-  if (traceTerrain(p, L, INF, uTerrainSteps/3 + 40, 0.6, t)) return true;
-  for (int i = 0; i < 8; i++){
+  for (int i = 0; i < MAX_TER; i++){
+    if (i >= uTerCount) break;
+    if (traceTer(i, p, L, INF, uTerrainSteps/3 + 40, 0.6, t)) return true;
+  }
+  for (int i = 0; i < MAX_OBJ; i++){
     if (i >= uObjCount) break;
     vec3 n;
-    if (hitObject(i, p, L, 0.001*uObjA[i].w, t, n)){
-      if (int(uObjB[i].y + 0.5) == 2) tint *= uObjC[i].rgb*0.85; else return true;
+    if (hitObject(i, p, L, t, n)){
+      int m = int(uObjScale[i].w + 0.5);
+      if (m == 2) tint *= uObjMat[i].rgb*0.85; else if (m != 3) return true;
     }
   }
   return false;
+}
+
+// luce ambiente fissa per gli stili non fotografici
+vec3 flatAmbient(vec3 n){
+  return mix(skyTex(normalize(vec3(n.x, 0.15, n.z))), skyTex(vec3(0,1,0)), clamp(n.y, 0.0, 1.0)) * uSkyLight * 0.9;
 }
 
 vec3 radiance(vec3 ro, vec3 rd){
@@ -448,7 +496,7 @@ vec3 radiance(vec3 ro, vec3 rd){
   for (int b = 0; b < 8; b++){
     if (b > uBounces) break;
     int steps = b == 0 ? uTerrainSteps : uTerrainSteps/2 + 30;
-    Hit h = traceScene(ro, rd, steps, true);
+    Hit h = traceScene(ro, rd, steps);
     float tSeg = h.id == 0 ? INF : h.t;
     if (inWater){
       vec3 sg = waterSigma();
@@ -474,7 +522,7 @@ vec3 radiance(vec3 ro, vec3 rd){
     float eps = max(0.02, h.t*0.0004);
 
     if (h.id == 3){
-      vec3 n = waterNormal(p, h.t);
+      vec3 n = uStyle == 2 ? vec3(0,1,0) : waterNormal(p, h.t);
       bool fromAbove = rd.y < 0.0;
       if (!fromAbove) n = -n;
       float eta = fromAbove ? 1.0/1.333 : 1.333;
@@ -501,7 +549,8 @@ vec3 radiance(vec3 ro, vec3 rd){
 
     Surf s;
     if (h.id >= 10) s = objectSurf(h.id - 10, h.n);
-    else s = terrainSurf(p, h.id == 2, h.t);
+    else if (h.id == 2) s = groundSurf(p);
+    else s = terrainSurf(h.sub, p, h.t);
 
     if (s.type == 3){ L += T * s.emit; break; }
 
@@ -539,30 +588,60 @@ vec3 radiance(vec3 ro, vec3 rd){
       continue;
     }
 
-    // diffuso: luce diretta del sole + rimbalzo
-    vec3 ld = coneDir(uSunDir, cos(uSunSize));
-    float ndl = dot(n, ld);
-    if (ndl > 0.0 && uSunColor.r + uSunColor.g + uSunColor.b > 0.0){
-      vec3 tint;
-      vec3 sp = p + n*eps;
-      if (!shadowed(sp, ld, tint)){
-        vec3 E = uSunColor * tint * cloudShadow(p);
-        if (inWater) E *= exp(-waterSigma() * max(uWaterLevel - p.y, 0.0) / max(ld.y, 0.1));
-        if (uFogDensity > 0.0) E *= exp(-fogOD(sp, ld, 30000.0));
-        L += T * s.albedo / PI * E * ndl;
+    // diffuso
+    vec3 sp = p + n*eps;
+    if (uStyle == 0){
+      // fotorealistico: sole con ombre morbide + luce indiretta
+      vec3 ld = coneDir(uSunDir, cos(uSunSize));
+      float ndl = dot(n, ld);
+      if (ndl > 0.0 && uSunColor.r + uSunColor.g + uSunColor.b > 0.0){
+        vec3 tint;
+        if (!shadowed(sp, ld, tint)){
+          vec3 E = uSunColor * tint * cloudShadow(p);
+          if (inWater) E *= exp(-waterSigma() * max(uWaterLevel - p.y, 0.0) / max(ld.y, 0.1));
+          if (uFogDensity > 0.0) E *= exp(-fogOD(sp, ld, 30000.0));
+          L += T * s.albedo / PI * E * ndl;
+        }
       }
-    }
-    T *= s.albedo;
-    rd = cosineDir(n);
-    ro = p + n*eps;
-    spec = false;
-    if (b >= 2){
-      float q = clamp(max(T.r, max(T.g, T.b)), 0.05, 0.95);
-      if (rnd() > q) break;
-      T /= q;
+      T *= s.albedo;
+      rd = cosineDir(n);
+      ro = sp;
+      spec = false;
+      if (b >= 2){
+        float q = clamp(max(T.r, max(T.g, T.b)), 0.05, 0.95);
+        if (rnd() > q) break;
+        T /= q;
+      }
+    } else {
+      // classico / illustrato: ombre nette, luce ambiente costante, nessun rimbalzo diffuso
+      float ndl = dot(n, uSunDir);
+      float lit = 0.0;
+      vec3 tint = vec3(1);
+      if (ndl > 0.0 && !shadowed(sp, uSunDir, tint)) lit = ndl * cloudShadow(p);
+      vec3 amb = flatAmbient(n);
+      if (uStyle == 2){
+        // bande di colore piatte
+        lit = lit > 0.55 ? 1.0 : lit > 0.18 ? 0.62 : lit > 0.0 ? 0.3 : 0.0;
+        float lum = dot(s.albedo, vec3(0.299, 0.587, 0.114));
+        s.albedo = clamp(mix(vec3(lum), s.albedo, 1.45), 0.0, 1.0);
+        amb = vec3(dot(amb, vec3(0.333))) * mix(vec3(0.75, 0.8, 1.0), vec3(1.0), 0.4);
+      }
+      vec3 E = uSunColor * tint * lit;
+      if (inWater) E *= exp(-waterSigma() * max(uWaterLevel - p.y, 0.0) / max(uSunDir.y, 0.1));
+      L += T * s.albedo * (E / PI + amb * 0.55);
+      break;
     }
   }
   return L;
+}
+
+// profondita' del raggio primario per i contorni dello stile illustrato
+float primaryDepth(vec2 fc, out int id){
+  vec2 sxy = (fc / uRes) * 2.0 - 1.0;
+  vec3 dir = normalize(uCamFwd + uCamRight*sxy.x*uTanHalf*uAspect + uCamUp*sxy.y*uTanHalf);
+  Hit h = traceScene(uCamPos, dir, uTerrainSteps);
+  id = h.id == 1 ? 1 + h.sub : h.id;
+  return h.id == 0 ? 1e7 : h.t;
 }
 
 void main(){
@@ -579,6 +658,16 @@ void main(){
     dir = normalize(fp - ro);
   }
   vec3 c = radiance(ro, dir);
+  if (uStyle == 2){
+    // contorni a inchiostro dove cambia oggetto o la distanza salta
+    vec2 fc = gl_FragCoord.xy - 0.5 + jit;
+    int i0, i1, i2;
+    float d0 = primaryDepth(fc, i0);
+    float d1 = primaryDepth(fc + vec2(1.2, 0.0), i1);
+    float d2 = primaryDepth(fc + vec2(0.0, 1.2), i2);
+    float rel = max(abs(d1 - d0), abs(d2 - d0)) / max(d0, 1.0);
+    if (i0 != i1 || i0 != i2 || rel > 0.06) c *= 0.12;
+  }
   if (!(c.r == c.r && c.g == c.g && c.b == c.b)) c = vec3(0);
   c = min(c, vec3(60.0));
   vec4 o = vec4(c, 1.0);
@@ -593,6 +682,7 @@ precision highp float;
 uniform sampler2D uAccum;
 uniform vec4 uViewport; // x, y, w, h in pixel del canvas
 uniform float uExposure, uVignette, uContrast, uSaturation;
+uniform int uBorder;    // 1: colore di fondo fuori dal riquadro, 0: trasparente
 out vec4 outColor;
 vec3 aces(vec3 x){
   const mat3 m1 = mat3(0.59719, 0.07600, 0.02840, 0.35458, 0.90834, 0.13383, 0.04823, 0.01566, 0.83777);

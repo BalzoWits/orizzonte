@@ -4,9 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Orizzonte</title>
-<meta name="description" content="Paesaggi 3D nel browser: terreni, cielo, nuvole e acqua con render fotografico progressivo.">
+<meta name="description" content="Paesaggi 3D nel browser: terreni, cielo, nuvole e acqua come oggetti di scena, con render fotografico progressivo.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23182029'/%3E%3Ccircle cx='21' cy='12' r='5' fill='%23f2b45a'/%3E%3Cpath d='M2 26l8-10 5 6 4-4 11 8z' fill='%238fb3c9'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="style.css">
+<script src="/torna.js" defer></script>
 </head>
 <body>
 <header class="top">
@@ -17,15 +18,45 @@
   <div class="status" id="status">Avvio…</div>
   <button id="btnRender" class="primary" type="button">
     <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 7h3l2-3h6l2 3h3v13H4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="12" cy="13" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>
-    Render finale
+    <span>Render finale</span>
   </button>
 </header>
+
+<nav class="createbar" aria-label="Crea">
+  <span class="cb-label">Crea</span>
+  <button type="button" data-create="terrain" title="Terreno: montagne, colline, isole, canyon, dune"><svg viewBox="0 0 24 24"><path d="M2 20l6-10 4 6 3-4 7 8z"/></svg><span>Terreno</span></button>
+  <button type="button" data-create="water" title="Piano d'acqua infinito"><svg viewBox="0 0 24 24"><path d="M2 10c3-3 5 3 8 0s5 3 8 0 4-1 4-1M2 16c3-3 5 3 8 0s5 3 8 0 4-1 4-1"/></svg><span>Acqua</span></button>
+  <button type="button" data-create="clouds" title="Strato di nuvole infinito"><svg viewBox="0 0 24 24"><path d="M7 18h11a4 4 0 0 0 0-8 6 6 0 0 0-11.5 1.5A3.3 3.3 0 0 0 7 18z"/></svg><span>Nuvole</span></button>
+  <button type="button" data-create="ground" title="Piano del suolo infinito"><svg viewBox="0 0 24 24"><path d="M2 17l5-5h15l-5 5zM2 21h15"/></svg><span>Suolo</span></button>
+  <i class="cb-sep"></i>
+  <button type="button" data-create="sphere" title="Sfera"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M4 12c0 2.2 3.6 4 8 4s8-1.8 8-4"/></svg><span>Sfera</span></button>
+  <button type="button" data-create="cube" title="Cubo"><svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9zM4 7.5l8 4.5 8-4.5M12 12v9"/></svg><span>Cubo</span></button>
+  <button type="button" data-create="cylinder" title="Cilindro"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/></svg><span>Cilindro</span></button>
+  <button type="button" data-create="light" title="Luce sferica"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg><span>Luce</span></button>
+</nav>
 
 <main>
   <div class="stage" id="stage">
     <canvas id="cv"></canvas>
-    <div class="frame" id="frame"></div>
-    <div class="busy" id="busy" hidden><span class="spin"></span>Genero il terreno…</div>
+    <canvas id="vp"></canvas>
+    <div class="guide" id="guide"></div>
+
+    <div class="vtools">
+      <div class="seg" id="gizmoModes" role="group" aria-label="Strumento">
+        <button type="button" data-gizmo="translate" title="Sposta (W)"><svg viewBox="0 0 24 24"><path d="M12 2v20M2 12h20M12 2l-3 3M12 2l3 3M12 22l-3-3M12 22l3-3M2 12l3-3M2 12l3 3M22 12l-3-3M22 12l-3 3"/></svg><span>Sposta</span></button>
+        <button type="button" data-gizmo="rotate" title="Ruota (E)"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/></svg><span>Ruota</span></button>
+        <button type="button" data-gizmo="scale" title="Scala (R)"><svg viewBox="0 0 24 24"><path d="M4 20h7v-7H4zM11 13l9-9M14 4h6v6"/></svg><span>Scala</span></button>
+      </div>
+      <div class="seg" id="shadeModes" role="group" aria-label="Vista">
+        <button type="button" data-shade="wire" title="Fil di ferro (1)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c3 3 3 13 0 16M12 4c-3 3-3 13 0 16"/></svg><span>Fili</span></button>
+        <button type="button" data-shade="solid" title="Solido senza colori (2)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="currentColor" stroke="none" opacity=".75"/></svg><span>Solido</span></button>
+        <button type="button" data-shade="material" title="Materiali in tempo reale (3)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none"/></svg><span>Materiali</span></button>
+        <button type="button" data-shade="render" title="Render progressivo nella vista (4)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="9" cy="9" r="2.5" fill="currentColor" stroke="none"/></svg><span>Render</span></button>
+      </div>
+      <button type="button" class="vbtn" id="btnFrame" title="Inquadra l'oggetto selezionato (F)"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/><circle cx="12" cy="12" r="3"/></svg></button>
+    </div>
+
+    <div class="busy" id="busy" hidden><span class="spin"></span><span id="busy-text">Genero il terreno…</span></div>
     <div class="renderbar" id="renderbar" hidden>
       <div class="rb-track"><div class="rb-fill" id="rb-fill"></div></div>
       <div class="rb-row">
@@ -37,18 +68,16 @@
       </div>
     </div>
     <div class="toast" id="toast"></div>
-    <div class="help">Trascina: ruota · Rotella: zoom · Tasto destro: sposta · Doppio clic: fuoco</div>
+    <div class="help" id="help">Sinistro: ruota · Destro: sposta · Rotella: zoom · Clic: seleziona · W E R: sposta, ruota, scala</div>
   </div>
 
   <aside class="panel">
     <nav class="tabs" aria-label="Pannelli">
-      <button type="button" data-tab="scene"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Scene</button>
-      <button type="button" data-tab="terreno"><svg viewBox="0 0 24 24"><path d="M2 20l6-10 4 6 3-4 7 8z"/></svg>Terreno</button>
+      <button type="button" data-tab="oggetto"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Oggetti</button>
       <button type="button" data-tab="cielo"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg>Cielo</button>
-      <button type="button" data-tab="acqua"><svg viewBox="0 0 24 24"><path d="M2 9c3-3 5 3 8 0s5 3 8 0 4-1 4-1M2 15c3-3 5 3 8 0s5 3 8 0 4-1 4-1"/></svg>Acqua</button>
-      <button type="button" data-tab="oggetti"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="5"/><path d="M13 3h8v8h-8z"/></svg>Oggetti</button>
       <button type="button" data-tab="camera"><svg viewBox="0 0 24 24"><path d="M3 7h12v10H3zM15 10l6-3v10l-6-3"/></svg>Camera</button>
       <button type="button" data-tab="render"><svg viewBox="0 0 24 24"><path d="M4 7h3l2-3h6l2 3h3v13H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Render</button>
+      <button type="button" data-tab="scene"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Scene</button>
     </nav>
     <div class="tabbody" id="tabbody"></div>
   </aside>
@@ -60,13 +89,13 @@
   <div>
     <h2>Questo browser non riesce a far girare Orizzonte</h2>
     <p id="fatal-msg"></p>
-    <p>Serve un browser recente con WebGL2 (Chrome, Edge o Firefox aggiornati) e l'accelerazione grafica attiva.</p>
+    <p>Serve un browser recente con WebGL2 (Chrome, Edge, Firefox o Safari aggiornati) e l'accelerazione grafica attiva.</p>
   </div>
 </div>
 
 <script src="js/terrain.js"></script>
 <script src="js/shaders.js"></script>
 <script src="js/renderer.js"></script>
-<script src="js/app.js"></script>
+<script type="module" src="js/app.js"></script>
 </body>
 </html>

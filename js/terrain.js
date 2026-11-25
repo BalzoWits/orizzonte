@@ -143,7 +143,67 @@ function generateHeightmap(p, onProgress) {
   let mn = Infinity;
   for (let k = 0; k < h.length; k++) if (h[k] < mn) mn = h[k];
   for (let k = 0; k < h.length; k++) h[k] = Math.max(0, h[k] - Math.max(0, mn));
-  return { N, h, flow };
+  const flowBytes = new Uint8Array(N * N);
+  let fmax = 0;
+  for (let k = 0; k < flow.length; k++) if (flow[k] > fmax) fmax = flow[k];
+  const lf = Math.log(1 + fmax * 0.25) || 1;
+  for (let k = 0; k < flow.length; k++) flowBytes[k] = Math.round(Math.min(1, Math.log(1 + flow[k] * 0.25) / lf) * 255);
+  return { N, h, flow, flowBytes };
+}
+
+// altezza normalizzata 0..1 con interpolazione bilineare (u,v in 0..1)
+function sampleHeight(t, u, v) {
+  const N = t.N;
+  const x = Math.min(N - 1.001, Math.max(0, u * (N - 1))), y = Math.min(N - 1.001, Math.max(0, v * (N - 1)));
+  const i = x | 0, j = y | 0, fx = x - i, fy = y - j, h = t.h, k = j * N + i;
+  const a = h[k] * (1 - fx) + h[k + 1] * fx, b = h[k + N] * (1 - fx) + h[k + N + 1] * fx;
+  return a * (1 - fy) + b * fy;
+}
+
+// Griglia per la vista 3D: posizioni in spazio unitario (x,z in -0.5..0.5, y = altezza 0..1)
+function terrainGrid(t, seg) {
+  const n = seg + 1;
+  const pos = new Float32Array(n * n * 3);
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    const u = i / seg, v = j / seg, k = (j * n + i) * 3;
+    pos[k] = u - 0.5; pos[k + 1] = sampleHeight(t, u, v); pos[k + 2] = v - 0.5;
+  }
+  const idx = new Uint32Array(seg * seg * 6);
+  let q = 0;
+  for (let j = 0; j < seg; j++) for (let i = 0; i < seg; i++) {
+    const a = j * n + i, b = a + 1, c = a + n, d = c + 1;
+    idx[q++] = a; idx[q++] = c; idx[q++] = b;
+    idx[q++] = b; idx[q++] = c; idx[q++] = d;
+  }
+  return { pos, idx, n };
+}
+
+// Colori dei vertici (lineari) con le stesse regole dello shader, senza il rumore fine
+function terrainColors(grid, t, o, pal, waterY) {
+  const { pos, n } = grid;
+  const col = new Float32Array(n * n * 3);
+  const cellX = o.w / (n - 1), cellZ = o.d / (n - 1);
+  const mix = (a, b, k) => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+  const sm = (e0, e1, x) => { const k = Math.min(1, Math.max(0, (x - e0) / (e1 - e0))); return k * k * (3 - 2 * k); };
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    const k = j * n + i;
+    const hN = pos[k * 3 + 1];
+    const l = pos[(j * n + Math.max(0, i - 1)) * 3 + 1], r = pos[(j * n + Math.min(n - 1, i + 1)) * 3 + 1];
+    const dn = pos[(Math.max(0, j - 1) * n + i) * 3 + 1], up = pos[(Math.min(n - 1, j + 1) * n + i) * 3 + 1];
+    const dx = (r - l) * o.h / (2 * cellX), dz = (up - dn) * o.h / (2 * cellZ);
+    const ny = 1 / Math.sqrt(1 + dx * dx + dz * dz);
+    const slope = 1 - ny;
+    const fu = Math.min(t.N - 1, Math.round((i / (n - 1)) * (t.N - 1))), fv = Math.min(t.N - 1, Math.round((j / (n - 1)) * (t.N - 1)));
+    const flow = t.flowBytes[fv * t.N + fu] / 255;
+    let c = mix(pal.low, pal.mid, sm(0.08, 0.55, hN));
+    c = mix(c, [c[0] * 0.6 + pal.sand[0] * 0.25, c[1] * 0.6 + pal.sand[1] * 0.25, c[2] * 0.6 + pal.sand[2] * 0.25], flow * 0.6);
+    c = mix(c, pal.rock, sm(o.rockSlope - 0.07, o.rockSlope + 0.07, slope));
+    const wy = o.y + hN * o.h;
+    if (waterY !== null) c = mix(c, pal.sand, 1 - sm(waterY + 2, waterY + 20, wy));
+    c = mix(c, pal.snow, sm(o.snowLine - 0.025, o.snowLine + 0.025, hN - slope * 0.45 + flow * 0.05));
+    col[k * 3] = c[0]; col[k * 3 + 1] = c[1]; col[k * 3 + 2] = c[2];
+  }
+  return col;
 }
 
 function smooth01(x) { x = Math.min(1, Math.max(0, x)); return x * x * (3 - 2 * x); }
