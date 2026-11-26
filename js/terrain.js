@@ -168,14 +168,17 @@ function terrainGrid(t, seg) {
     const u = i / seg, v = j / seg, k = (j * n + i) * 3;
     pos[k] = u - 0.5; pos[k + 1] = sampleHeight(t, u, v); pos[k + 2] = v - 0.5;
   }
+  // si saltano i quadrati del tutto piatti a quota zero (il bordo che si raccorda col suolo)
   const idx = new Uint32Array(seg * seg * 6);
   let q = 0;
+  const flat = k => pos[k * 3 + 1] < 0.002;
   for (let j = 0; j < seg; j++) for (let i = 0; i < seg; i++) {
     const a = j * n + i, b = a + 1, c = a + n, d = c + 1;
+    if (flat(a) && flat(b) && flat(c) && flat(d)) continue;
     idx[q++] = a; idx[q++] = c; idx[q++] = b;
     idx[q++] = b; idx[q++] = c; idx[q++] = d;
   }
-  return { pos, idx, n };
+  return { pos, idx: idx.slice(0, Math.max(q, 3)), n };
 }
 
 // Colori dei vertici (lineari) con le stesse regole dello shader, senza il rumore fine

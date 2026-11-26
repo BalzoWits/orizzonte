@@ -43,6 +43,9 @@ class Renderer {
     this.allocTerrains(2);
     // dati degli oggetti: una riga di OBJ_W texel RGBA32F per oggetto
     this.objTex = this.texture2D(gl.RGBA32F, OBJ_W, MAX_OBJ, gl.RGBA, gl.FLOAT, new Float32Array(OBJ_W * MAX_OBJ * 4), gl.NEAREST, gl.CLAMP_TO_EDGE, gl.CLAMP_TO_EDGE);
+    // modelli importati (BVH e triangoli), riallocati quando servono
+    this.meshNodesTex = this.texture2D(gl.RGBA32F, 1, 1, gl.RGBA, gl.FLOAT, new Float32Array(4), gl.NEAREST, gl.CLAMP_TO_EDGE, gl.CLAMP_TO_EDGE);
+    this.meshTrisTex = this.texture2D(gl.RGBA32F, 1, 1, gl.RGBA, gl.FLOAT, new Float32Array(4), gl.NEAREST, gl.CLAMP_TO_EDGE, gl.CLAMP_TO_EDGE);
     // immagini dell'utente per i materiali
     this.imgArr = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.imgArr);
@@ -138,6 +141,20 @@ class Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this.objTex);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, OBJ_W, MAX_OBJ, gl.RGBA, gl.FLOAT, data);
   }
+  // dati RGBA32F in texture larghe MESH_TEX_W (4 float per texel)
+  uploadMeshes(nodes, tris) {
+    const gl = this.gl;
+    const mk = (old, data) => {
+      gl.deleteTexture(old);
+      const texels = Math.max(1, data.length / 4);
+      const h = Math.ceil(texels / MESH_TEX_W);
+      const full = new Float32Array(MESH_TEX_W * h * 4);
+      full.set(data);
+      return this.texture2D(gl.RGBA32F, MESH_TEX_W, h, gl.RGBA, gl.FLOAT, full, gl.NEAREST, gl.CLAMP_TO_EDGE, gl.CLAMP_TO_EDGE);
+    };
+    this.meshNodesTex = mk(this.meshNodesTex, nodes);
+    this.meshTrisTex = mk(this.meshTrisTex, tris);
+  }
   // immagine gia' ridimensionata a IMG_SIZE x IMG_SIZE (canvas o ImageData)
   uploadImage(layer, source) {
     const gl = this.gl;
@@ -174,6 +191,15 @@ class Renderer {
     gl.uniform3fv(this.u(p, 'uRayleigh'), sc.rayleigh);
     gl.uniform1f(this.u(p, 'uMie'), sc.mie);
     gl.uniform1f(this.u(p, 'uSunPower'), sc.sunPower);
+    gl.uniform1i(this.u(p, 'uMode'), sc.skyMode);
+    gl.uniform3fv(this.u(p, 'uZenith'), sc.skyZenith);
+    gl.uniform3fv(this.u(p, 'uHorizon'), sc.skyHorizon);
+    gl.uniform3fv(this.u(p, 'uBelow'), sc.skyBelow);
+    gl.uniform3fv(this.u(p, 'uSunTint'), sc.skySunTint);
+    gl.uniform3fv(this.u(p, 'uNeb1'), sc.skyNeb1);
+    gl.uniform3fv(this.u(p, 'uNeb2'), sc.skyNeb2);
+    gl.uniform1f(this.u(p, 'uBright'), sc.skyBright);
+    gl.uniform1f(this.u(p, 'uNebula'), sc.skyNebula);
     gl.bindVertexArray(this.vao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
@@ -236,6 +262,7 @@ class Renderer {
     gl.uniform3fv(u('uGroundColor3'), sc.groundColor3);
     gl.uniform4fv(u('uGroundPat'), sc.groundPat);
     gl.uniform1f(u('uGroundShine'), sc.groundShine);
+    gl.uniform1i(u('uGroundImgRepeat'), sc.groundImgRepeat ? 1 : 0);
     gl.uniform1i(u('uWaterOn'), sc.waterOn ? 1 : 0);
     gl.uniform1f(u('uWaterLevel'), sc.waterLevel);
     gl.uniform1f(u('uWaterClarity'), sc.waterClarity);
@@ -247,6 +274,9 @@ class Renderer {
     gl.uniform1f(u('uFogDensity'), sc.fogDensity);
     gl.uniform1f(u('uFogFalloff'), sc.fogFalloff);
     gl.uniform1f(u('uSkyLight'), sc.skyLight);
+    gl.uniform1i(u('uSkyMode'), sc.skyMode);
+    gl.uniform1f(u('uStars'), sc.skyStars);
+    gl.uniform1fv(u('uTerFloat'), sc.terFloat);
     gl.uniform1f(u('uCloudCover'), sc.cloudCover);
     gl.uniform1f(u('uCloudDensity'), sc.cloudDensity);
     gl.uniform1f(u('uCloudBottom'), sc.cloudBottom);
@@ -273,6 +303,8 @@ class Renderer {
     bind(4, gl.TEXTURE_2D, prevTex || this.dummyTex, 'uPrev');
     bind(5, gl.TEXTURE_2D, this.objTex, 'uObjTex');
     bind(6, gl.TEXTURE_2D_ARRAY, this.imgArr, 'uImages');
+    bind(7, gl.TEXTURE_2D, this.meshNodesTex, 'uMeshNodes');
+    bind(8, gl.TEXTURE_2D, this.meshTrisTex, 'uMeshTris');
   }
 
   // Aggiunge campioni all'accumulatore entro un budget di pixel. Restituisce i pixel tracciati.

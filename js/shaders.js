@@ -13,9 +13,38 @@ uniform vec3 uSunDir;
 uniform vec3 uRayleigh;   // coefficienti Rayleigh (1/m)
 uniform float uMie;       // coefficiente Mie (1/m)
 uniform float uSunPower;
+uniform int uMode;                 // 0 fisico, 1 dipinto, 2 spaziale
+uniform vec3 uZenith, uHorizon, uBelow, uSunTint, uNeb1, uNeb2;
+uniform float uBright, uNebula;
 out vec4 outColor;
 const float PI = 3.14159265;
 const float RE = 6360e3, RA = 6420e3, HR = 8000.0, HM = 1200.0;
+
+float hash3(vec3 p){ p = fract(p*0.3183099 + 0.1); p *= 17.0; return fract(p.x*p.y*p.z*(p.x + p.y + p.z)); }
+float vnoise(vec3 x){
+  vec3 i = floor(x), f = fract(x);
+  f = f*f*(3.0 - 2.0*f);
+  return mix(mix(mix(hash3(i), hash3(i + vec3(1,0,0)), f.x), mix(hash3(i + vec3(0,1,0)), hash3(i + vec3(1,1,0)), f.x), f.y),
+             mix(mix(hash3(i + vec3(0,0,1)), hash3(i + vec3(1,0,1)), f.x), mix(hash3(i + vec3(0,1,1)), hash3(i + vec3(1,1,1)), f.x), f.y), f.z);
+}
+float fbm(vec3 p){ float s = 0.0, a = 0.5; for (int i = 0; i < 6; i++){ s += a*vnoise(p); p = p*2.03 + 1.7; a *= 0.5; } return s; }
+
+// cieli non fisici: sfumatura dipinta o spazio con nebulose
+vec3 artSky(vec3 rd){
+  float y = rd.y;
+  float mu = max(dot(rd, uSunDir), 0.0);
+  vec3 glow = uSunTint * (pow(mu, 48.0)*0.6 + pow(mu, 6.0)*0.12);
+  if (uMode == 1){
+    vec3 c = y >= 0.0 ? mix(uHorizon, uZenith, pow(y, 0.45)) : mix(uHorizon, uBelow, pow(-y, 0.35));
+    return (c + glow) * uBright;
+  }
+  vec3 c = uZenith * 0.025;
+  float n = fbm(rd*2.2 + 4.0);
+  float neb = smoothstep(0.42, 0.85, n) * uNebula;
+  vec3 nc = mix(uNeb1, uNeb2, smoothstep(0.3, 0.7, fbm(rd*4.5 + 11.0)));
+  c += nc * neb * (0.35 + 0.65*fbm(rd*9.0));
+  return (c + glow*0.5) * uBright;
+}
 
 vec2 raySphere(vec3 ro, vec3 rd, float r){
   float b = dot(ro, rd), c = dot(ro, ro) - r*r, d = b*b - c;
@@ -26,6 +55,10 @@ void main(){
   vec2 uv = gl_FragCoord.xy / uRes;
   float phi = (uv.x - 0.5) * 2.0 * PI;
   float el = (uv.y - 0.5) * PI;
+  if (uMode != 0){
+    outColor = vec4(artSky(vec3(cos(el)*cos(phi), sin(el), cos(el)*sin(phi))), 1.0);
+    return;
+  }
   float elc = max(el, 0.0);
   vec3 rd = vec3(cos(elc)*cos(phi), sin(elc), cos(elc)*sin(phi));
   vec3 ro = vec3(0.0, RE + 2.0, 0.0);
@@ -64,7 +97,7 @@ void main(){
   outColor = vec4(col, 1.0);
 }`;
 
-const MAX_TER = 4, MAX_OBJ = 16, OBJ_W = 16, MAX_IMG = 4, IMG_SIZE = 512;
+const MAX_TER = 4, MAX_OBJ = 48, OBJ_W = 16, MAX_IMG = 4, IMG_SIZE = 512, MESH_TEX_W = 2048;
 
 const FS_TRACE = `#version 300 es
 precision highp float;
@@ -97,8 +130,11 @@ uniform float uGroundY;
 uniform vec3 uGroundColor, uGroundColor2, uGroundColor3;
 uniform vec4 uGroundPat;           // motivo, scala, immagine, specchio
 uniform float uGroundShine;
+uniform int uGroundImgRepeat;
 uniform highp sampler2DArray uImages;   // immagini caricate dall'utente (sRGB)
 uniform sampler2D uObjTex;         // dati degli oggetti: una riga per oggetto
+uniform sampler2D uMeshNodes;      // BVH dei modelli importati: 2 texel per nodo
+uniform sampler2D uMeshTris;       // triangoli: 3 vertici + 3 normali per triangolo
 uniform int uWaterOn;
 uniform float uWaterLevel, uWaterClarity, uWaves;
 uniform vec3 uWaterColor;
@@ -107,6 +143,9 @@ uniform float uCloudCover, uCloudDensity, uCloudBottom, uCloudTop, uCloudScale;
 uniform vec3 uSunDir, uSunColor;
 uniform float uSunSize;
 uniform float uFogDensity, uFogFalloff, uSkyLight;
+uniform int uSkyMode;
+uniform float uStars;
+uniform float uTerFloat[MAX_TER];  // terreni sospesi: profondita' della parte sotto (0 = poggiati)
 uniform int uCloudSteps, uBounces, uTerrainSteps;
 // oggetti (righe di uObjTex):
 // 0 centro, forma | 1 semiassi, tipo materiale | 2-4 colonne mondo->locale | 5 colore, ruvidita'
@@ -154,8 +193,21 @@ vec3 skyTex(vec3 d){
   float v = asin(clamp(d.y, -1.0, 1.0)) / PI + 0.5;
   return texture(uSky, vec2(u, v)).rgb;
 }
+// stelle (cielo spaziale): punti nitidi calcolati per direzione, non nella texture
+vec3 starField(vec3 d){
+  vec3 q = d * 260.0;
+  vec3 c = floor(q), f = fract(q);
+  float h = fract(sin(dot(c, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+  if (h > uStars * 0.08) return vec3(0);
+  vec3 o = vec3(fract(h*13.1), fract(h*71.7), fract(h*37.3))*0.7 + 0.15;
+  float r = length(f - o);
+  float b = pow(fract(h*91.3), 4.0)*60.0 + 3.0;
+  vec3 col = mix(vec3(0.65, 0.78, 1.0), vec3(1.0, 0.82, 0.62), fract(h*5.3));
+  return col * b * smoothstep(0.14, 0.0, r);
+}
 vec3 skyRadiance(vec3 d, bool withSun){
   vec3 c = skyTex(d);
+  if (uSkyMode == 2) c += starField(d);
   if (withSun){
     float cr = cos(uSunSize);
     float ca = dot(d, uSunDir);
@@ -178,16 +230,36 @@ float terH(int i, vec2 q){
       + (texture(uNoise, vec3(q*f*75.0, 0.81)).g - 0.5)*0.01) * S.y * m;
   return h;
 }
+// sotto dei terreni sospesi: la forma si specchia verso il basso, frastagliata
+float terBot(int i, vec2 q, float h){
+  vec4 S = uTerSize[i];
+  float f = 1.0 / max(S.x, S.z);
+  float n = texture(uNoise, vec3(q*f*23.0, 0.55)).r*0.7 + texture(uNoise, vec3(q*f*90.0, 0.15)).g*0.3;
+  return -uTerFloat[i] * h * (0.55 + 0.9*n);
+}
+// distanza (approssimata) dalla superficie: > 0 fuori, < 0 dentro la roccia
+float terF(int i, vec3 p){
+  float h = terH(i, p.xz);
+  if (uTerFloat[i] <= 0.0) return p.y - h;
+  return max(p.y - h, terBot(i, p.xz, h) - p.y);
+}
 vec3 terNormalLocal(int i, vec2 q, float t){
   float e = max(0.5, t*0.0012);
   float hx = terH(i, q + vec2(e, 0.0)) - terH(i, q - vec2(e, 0.0));
   float hz = terH(i, q + vec2(0.0, e)) - terH(i, q - vec2(0.0, e));
   return normalize(vec3(-hx, 2.0*e, -hz));
 }
+vec3 terBotNormalLocal(int i, vec2 q, float t){
+  float e = max(0.5, t*0.0012);
+  vec2 dx = vec2(e, 0.0), dz = vec2(0.0, e);
+  float gx = terBot(i, q + dx, terH(i, q + dx)) - terBot(i, q - dx, terH(i, q - dx));
+  float gz = terBot(i, q + dz, terH(i, q + dz)) - terBot(i, q - dz, terH(i, q - dz));
+  return normalize(vec3(gx, -2.0*e, gz));
+}
 bool traceTer(int i, vec3 ro, vec3 rd, float tmax, int steps, float k, out float tHit){
   vec4 P = uTerPos[i], S = uTerSize[i];
   vec3 lo = rotY(ro - P.xyz, -P.w), ld = rotY(rd, -P.w);
-  vec3 bmin = vec3(-0.5*S.x, -1.0, -0.5*S.z);
+  vec3 bmin = vec3(-0.5*S.x, -1.0 - S.y*uTerFloat[i]*1.5, -0.5*S.z);
   vec3 bmax = vec3(0.5*S.x, S.y*1.03 + 1.0, 0.5*S.z);
   vec3 inv = 1.0 / ld;
   vec3 t0 = (bmin - lo)*inv, t1 = (bmax - lo)*inv;
@@ -197,7 +269,7 @@ bool traceTer(int i, vec3 ro, vec3 rd, float tmax, int steps, float k, out float
   if (ta >= tb) return false;
   float t = ta;
   vec3 p = lo + ld*t;
-  float d = p.y - terH(i, p.xz);
+  float d = terF(i, p);
   if (d < 0.0 && ta > 0.0) { tHit = t; return true; }
   float minStep = max(0.05, 0.0004*max(S.x, S.z));
   for (int s = 0; s < 700; s++){
@@ -206,13 +278,12 @@ bool traceTer(int i, vec3 ro, vec3 rd, float tmax, int steps, float k, out float
     t += max(d*k, minStep + t*0.0012);
     if (t > tb) return false;
     p = lo + ld*t;
-    d = p.y - terH(i, p.xz);
+    d = terF(i, p);
     if (d < 0.0){
       float a = tp, b = t;
       for (int j = 0; j < 7; j++){
         float m = 0.5*(a + b);
-        vec3 q = lo + ld*m;
-        if (q.y - terH(i, q.xz) < 0.0) b = m; else a = m;
+        if (terF(i, lo + ld*m) < 0.0) b = m; else a = m;
       }
       tHit = b; return true;
     }
@@ -274,9 +345,66 @@ vec3 sdfNormal(int i, int shape, vec3 q){
                  + k.yxy*sdfObj(i, shape, q + k.yxy*e) + k.xxx*sdfObj(i, shape, q + k.xxx*e));
 }
 
+vec4 MNf(int i){ return texelFetch(uMeshNodes, ivec2(i % ${MESH_TEX_W}, i / ${MESH_TEX_W}), 0); }
+vec4 MTf(int i){ return texelFetch(uMeshTris, ivec2(i % ${MESH_TEX_W}, i / ${MESH_TEX_W}), 0); }
+// modello importato: BVH con pila, triangoli Moller-Trumbore, normali interpolate (spazio unitario)
+bool traceMesh(int root, vec3 lo, vec3 ld, float eps, out float tOut, out vec3 nOut){
+  vec3 inv = 1.0 / ld;
+  int stack[32];
+  int sp = 0;
+  stack[sp++] = root;
+  float best = INF; vec3 bn = vec3(0, 1, 0);
+  for (int it = 0; it < 2048; it++){
+    if (sp == 0) break;
+    int ni = stack[--sp];
+    vec4 a = MNf(ni*2), b = MNf(ni*2 + 1);
+    vec3 t0 = (a.xyz - lo)*inv, t1 = (b.xyz - lo)*inv;
+    vec3 tmn = min(t0, t1), tmx = max(t0, t1);
+    float tn = max(max(tmn.x, tmn.y), tmn.z), tf = min(min(tmx.x, tmx.y), tmx.z);
+    if (tn > tf || tf < eps || tn > best) continue;
+    if (b.w > 0.5){
+      int start = int(a.w + 0.5), cnt = int(b.w + 0.5);
+      for (int k = 0; k < 4; k++){
+        if (k >= cnt) break;
+        int tb = (start + k) * 6;
+        vec3 v0 = MTf(tb).xyz, v1 = MTf(tb + 1).xyz, v2 = MTf(tb + 2).xyz;
+        vec3 e1 = v1 - v0, e2 = v2 - v0;
+        vec3 pv = cross(ld, e2);
+        float det = dot(e1, pv);
+        if (abs(det) < 1e-14) continue;
+        float id = 1.0 / det;
+        vec3 tv = lo - v0;
+        float u = dot(tv, pv) * id;
+        if (u < 0.0 || u > 1.0) continue;
+        vec3 qv = cross(tv, e1);
+        float v = dot(ld, qv) * id;
+        if (v < 0.0 || u + v > 1.0) continue;
+        float tt = dot(e2, qv) * id;
+        if (tt > eps && tt < best){
+          best = tt;
+          bn = MTf(tb + 3).xyz*(1.0 - u - v) + MTf(tb + 4).xyz*u + MTf(tb + 5).xyz*v;
+          if (dot(bn, bn) < 1e-8) bn = cross(e1, e2);
+        }
+      }
+    } else if (sp < 30){
+      stack[sp++] = int(a.w + 0.5);
+      stack[sp++] = ni + 1;
+    }
+  }
+  if (best >= INF) return false;
+  tOut = best; nOut = normalize(bn);
+  return true;
+}
+
 // t piu' vicino > eps, normale esterna (mondo) e punto locale in metri
 bool hitObject(int i, vec3 ro, vec3 rd, out float tOut, out vec3 nOut, out vec3 lp){
-  vec4 P = OT(i, 0), Sc = OT(i, 1);
+  vec4 P = OT(i, 0);
+  // scarto veloce con la sfera che contiene l'oggetto
+  float br = OT(i, 9).w;
+  vec3 oc = ro - P.xyz;
+  float bb = dot(oc, rd), bc = dot(oc, oc) - br*br;
+  if (bc > 0.0 && (bb > 0.0 || bb*bb - bc < 0.0)) return false;
+  vec4 Sc = OT(i, 1);
   vec3 s = Sc.xyz;
   mat3 M = mat3(OT(i, 2).xyz, OT(i, 3).xyz, OT(i, 4).xyz);
   vec3 lo = (M * (ro - P.xyz)) / s;
@@ -321,6 +449,9 @@ bool hitObject(int i, vec3 ro, vec3 rd, out float tOut, out vec3 nOut, out vec3 
       }
     }
     if (t >= INF) return false;
+  } else if (shape == 11){
+    int root = int(OT(i, 9).y + 0.5);
+    if (OT(i, 9).y < 0.0 || !traceMesh(root, lo, ld, eps, t, nl)) return false;
   } else {
     // forme a distanza: si cammina dentro il cubo unitario che le contiene
     vec3 inv = 1.0 / ld;
@@ -517,7 +648,10 @@ Surf groundSurf(vec3 p){
   int pat = int(uGroundPat.x + 0.5);
   if (pat > 0){
     float sc = uGroundPat.y;
-    s.albedo = pattern(pat, vec3(p.x, sc*0.5, p.z), sc, uGroundColor, uGroundColor2, uGroundColor3, 0.0, p.xz / (sc*8.0), uGroundPat.z);
+    // immagine: lato = sc metri, centrata nell'origine; se non si ripete, fuori resta il colore 1
+    vec2 uv = vec2(p.x, -p.z) / sc + 0.5;
+    if (pat == 5 && uGroundImgRepeat == 0 && (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0)) pat = 0;
+    s.albedo = pat == 0 ? uGroundColor : pattern(pat, vec3(p.x, sc*0.5, p.z), sc, uGroundColor, uGroundColor2, uGroundColor3, 0.0, uv, uGroundPat.z);
     s.albedo = clamp(s.albedo, 0.0, 0.95);
     return s;
   }
@@ -535,6 +669,15 @@ Surf terrainSurf(int i, vec3 p, float dist){
   vec4 P = uTerPos[i], S = uTerSize[i];
   vec3 q = rotY(p - P.xyz, -P.w);
   float flow = texture(uFlows, vec3(q.xz / S.xz + 0.5, S.w)).r;
+  if (uTerFloat[i] > 0.0 && q.y < -0.5){
+    // parte sotto di un'isola sospesa: roccia nuda
+    s.n = rotY(terBotNormalLocal(i, q.xz, dist), P.w);
+    float m1 = texture(uNoise, p*0.004).r, m2 = texture(uNoise, p*0.02).g;
+    vec3 rk = uTerRock[i] * (0.55 + 0.6*m2) * (0.75 + 0.5*m1);
+    rk *= 0.85 + 0.15*sin(q.y*0.08 + m1*8.0);
+    s.albedo = clamp(rk, 0.0, 0.9);
+    return s;
+  }
   vec3 n = rotY(terNormalLocal(i, q.xz, dist), P.w);
   float n1 = texture(uNoise, p*0.00055).r;
   float n2 = texture(uNoise, p*0.0031).g;
@@ -574,7 +717,7 @@ Surf objectSurf(int i, vec3 n, vec3 lp){
   vec2 uv = vec2(0);
   vec3 lu = lp / sc.xyz;
   if (pat == 5){
-    if (shape == 0 || shape == 9 || shape == 10){
+    if (shape == 0 || shape == 10){
       vec3 d = normalize(lu);
       uv = vec2(atan(d.z, d.x) / (2.0*PI) + 0.5, asin(clamp(d.y, -1.0, 1.0)) / PI + 0.5);
     } else {
