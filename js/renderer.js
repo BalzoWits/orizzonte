@@ -41,6 +41,16 @@ class Renderer {
 
     this.heightArr = null; this.flowArr = null; this.terN = 0;
     this.allocTerrains(2);
+    // dati degli oggetti: una riga di OBJ_W texel RGBA32F per oggetto
+    this.objTex = this.texture2D(gl.RGBA32F, OBJ_W, MAX_OBJ, gl.RGBA, gl.FLOAT, new Float32Array(OBJ_W * MAX_OBJ * 4), gl.NEAREST, gl.CLAMP_TO_EDGE, gl.CLAMP_TO_EDGE);
+    // immagini dell'utente per i materiali
+    this.imgArr = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.imgArr);
+    gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA8, IMG_SIZE, IMG_SIZE, MAX_IMG, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.REPEAT);
     this.dummyTex = this.texture2D(gl.RGBA32F, 1, 1, gl.RGBA, gl.FLOAT, new Float32Array(4), gl.NEAREST, gl.CLAMP_TO_EDGE, gl.CLAMP_TO_EDGE);
     this.uloc = new Map();
   }
@@ -121,6 +131,20 @@ class Renderer {
     gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, layer, t.N, t.N, 1, gl.RED, gl.FLOAT, t.h);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.flowArr);
     gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, layer, t.N, t.N, 1, gl.RED, gl.UNSIGNED_BYTE, t.flowBytes);
+  }
+
+  uploadObjects(data) {
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.objTex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, OBJ_W, MAX_OBJ, gl.RGBA, gl.FLOAT, data);
+  }
+  // immagine gia' ridimensionata a IMG_SIZE x IMG_SIZE (canvas o ImageData)
+  uploadImage(layer, source) {
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.imgArr);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, layer, IMG_SIZE, IMG_SIZE, 1, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   }
 
   // cielo gia' esposto e tonemappato, come immagine equirettangolare per lo sfondo della vista 3D
@@ -208,6 +232,10 @@ class Renderer {
     gl.uniform1i(u('uGroundOn'), sc.groundOn ? 1 : 0);
     gl.uniform1f(u('uGroundY'), sc.groundY);
     gl.uniform3fv(u('uGroundColor'), sc.groundColor);
+    gl.uniform3fv(u('uGroundColor2'), sc.groundColor2);
+    gl.uniform3fv(u('uGroundColor3'), sc.groundColor3);
+    gl.uniform4fv(u('uGroundPat'), sc.groundPat);
+    gl.uniform1f(u('uGroundShine'), sc.groundShine);
     gl.uniform1i(u('uWaterOn'), sc.waterOn ? 1 : 0);
     gl.uniform1f(u('uWaterLevel'), sc.waterLevel);
     gl.uniform1f(u('uWaterClarity'), sc.waterClarity);
@@ -228,11 +256,7 @@ class Renderer {
     gl.uniform1i(u('uBounces'), q.bounces);
     gl.uniform1i(u('uTerrainSteps'), q.terrainSteps);
     gl.uniform1i(u('uObjCount'), sc.objCount);
-    gl.uniform4fv(u('uObjPos'), sc.objPos);
-    gl.uniform4fv(u('uObjScale'), sc.objScale);
-    gl.uniformMatrix3fv(u('uObjRot'), false, sc.objRot);
-    gl.uniform4fv(u('uObjMat'), sc.objMat);
-    gl.uniform1fv(u('uObjEmit'), sc.objEmit);
+    if (sc.objData !== this._objData) { this.uploadObjects(sc.objData); this._objData = sc.objData; }
   }
 
   bindTraceTextures(prevTex) {
@@ -247,6 +271,8 @@ class Renderer {
     bind(2, gl.TEXTURE_3D, this.noiseTex, 'uNoise');
     bind(3, gl.TEXTURE_2D, this.skyTex, 'uSky');
     bind(4, gl.TEXTURE_2D, prevTex || this.dummyTex, 'uPrev');
+    bind(5, gl.TEXTURE_2D, this.objTex, 'uObjTex');
+    bind(6, gl.TEXTURE_2D_ARRAY, this.imgArr, 'uImages');
   }
 
   // Aggiunge campioni all'accumulatore entro un budget di pixel. Restituisce i pixel tracciati.

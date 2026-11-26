@@ -64,7 +64,7 @@ void main(){
   outColor = vec4(col, 1.0);
 }`;
 
-const MAX_TER = 4, MAX_OBJ = 8;
+const MAX_TER = 4, MAX_OBJ = 16, OBJ_W = 16, MAX_IMG = 4, IMG_SIZE = 512;
 
 const FS_TRACE = `#version 300 es
 precision highp float;
@@ -74,6 +74,7 @@ precision highp sampler2DArray;
 
 #define MAX_TER ${MAX_TER}
 #define MAX_OBJ ${MAX_OBJ}
+#define PI_C 3.14159265
 
 uniform vec2 uRes;
 uniform int uFrame;
@@ -93,7 +94,11 @@ uniform vec2 uTerMat[MAX_TER];     // quota neve, pendenza roccia
 // piani infiniti
 uniform int uGroundOn;
 uniform float uGroundY;
-uniform vec3 uGroundColor;
+uniform vec3 uGroundColor, uGroundColor2, uGroundColor3;
+uniform vec4 uGroundPat;           // motivo, scala, immagine, specchio
+uniform float uGroundShine;
+uniform highp sampler2DArray uImages;   // immagini caricate dall'utente (sRGB)
+uniform sampler2D uObjTex;         // dati degli oggetti: una riga per oggetto
 uniform int uWaterOn;
 uniform float uWaterLevel, uWaterClarity, uWaves;
 uniform vec3 uWaterColor;
@@ -103,13 +108,11 @@ uniform vec3 uSunDir, uSunColor;
 uniform float uSunSize;
 uniform float uFogDensity, uFogFalloff, uSkyLight;
 uniform int uCloudSteps, uBounces, uTerrainSteps;
-// oggetti
+// oggetti (righe di uObjTex):
+// 0 centro, forma | 1 semiassi, tipo materiale | 2-4 colonne mondo->locale | 5 colore, ruvidita'
+// 6 colore 2, specchio | 7 colore 3, lucentezza | 8 motivo, scala motivo, immagine, emissione
+// 9 parametro forma, - | 10-15 sfere del blob (centro, raggio)
 uniform int uObjCount;
-uniform vec4 uObjPos[MAX_OBJ];     // centro, forma
-uniform vec4 uObjScale[MAX_OBJ];   // semiassi, materiale
-uniform mat3 uObjRot[MAX_OBJ];     // mondo -> locale
-uniform vec4 uObjMat[MAX_OBJ];     // colore, ruvidita'
-uniform float uObjEmit[MAX_OBJ];
 uniform int uUsePrev;
 uniform sampler2D uPrev;
 
@@ -218,13 +221,68 @@ bool traceTer(int i, vec3 ro, vec3 rd, float tmax, int steps, float k, out float
 }
 
 // ---------- oggetti (spazio locale unitario) ----------
-bool hitObject(int i, vec3 ro, vec3 rd, out float tOut, out vec3 nOut){
-  vec3 s = uObjScale[i].xyz;
-  mat3 M = uObjRot[i];
-  vec3 lo = (M * (ro - uObjPos[i].xyz)) / s;
+vec4 OT(int i, int k){ return texelFetch(uObjTex, ivec2(k, i), 0); }
+
+float smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }
+float sdPyramid(vec3 p, float h){
+  float m2 = h*h + 0.25;
+  p.xz = abs(p.xz);
+  p.xz = (p.z > p.x) ? p.zx : p.xz;
+  p.xz -= 0.5;
+  vec3 q = vec3(p.z, h*p.y - 0.5*p.x, h*p.x + 0.5*p.y);
+  float s = max(-q.x, 0.0);
+  float t = clamp((q.y - 0.5*p.z) / (m2 + 0.25), 0.0, 1.0);
+  float a = m2*(q.x + s)*(q.x + s) + q.y*q.y;
+  float b = m2*(q.x + 0.5*t)*(q.x + 0.5*t) + (q.y - m2*t)*(q.y - m2*t);
+  float d2 = min(q.y, -q.x*m2 - q.y*0.5) > 0.0 ? 0.0 : min(a, b);
+  return sqrt((d2 + q.z*q.z) / m2) * sign(max(q.z, -p.y));
+}
+float sdCappedCone(vec3 p, float h, float r1, float r2){
+  vec2 q = vec2(length(p.xz), p.y);
+  vec2 k1 = vec2(r2, h), k2 = vec2(r2 - r1, 2.0*h);
+  vec2 ca = vec2(q.x - min(q.x, (q.y < 0.0) ? r1 : r2), abs(q.y) - h);
+  vec2 cb = q - k1 + k2*clamp(dot(k1 - q, k2) / dot(k2, k2), 0.0, 1.0);
+  float s = (cb.x < 0.0 && ca.y < 0.0) ? -1.0 : 1.0;
+  return s*sqrt(min(dot(ca, ca), dot(cb, cb)));
+}
+// forme a distanza (3 toro, 4 cono, 5 piramide, 6 capsula, 7 anello, 8 arco, 9 blob, 10 cupola), spazio unitario
+float sdfObj(int i, int shape, vec3 q){
+  float p1 = OT(i, 9).x;
+  if (shape == 3){ float r = clamp(p1, 0.05, 0.5); return length(vec2(length(q.xz) - (1.0 - r), q.y)) - r; }
+  if (shape == 4) return sdCappedCone(q, 1.0, 1.0, clamp(p1, 0.0, 1.0));
+  if (shape == 5) return sdPyramid(vec3(q.x*0.5, (q.y + 1.0)*0.5, q.z*0.5), 1.0) * 2.0;
+  if (shape == 6){ float r = clamp(p1, 0.1, 1.0); return length(q - vec3(0.0, clamp(q.y, -(1.0 - r), 1.0 - r), 0.0)) - r; }
+  if (shape == 7){ float w = p1*0.45 + 0.02; return max(abs(length(q.xz) - (1.0 - w)) - w, abs(q.y) - 0.04); }
+  if (shape == 8){ float r = clamp(p1, 0.05, 0.5); float d = length(vec2(length(q.xy) - (1.0 - r), q.z)) - r; return max(d, -q.y); }
+  if (shape == 9){
+    float k = p1*0.6 + 0.05;
+    float d = 1e5;
+    for (int b = 0; b < 6; b++){
+      vec4 s = OT(i, 10 + b);
+      if (s.w <= 0.0) break;
+      d = smin(d, length(q - s.xyz) - s.w, k);
+    }
+    return d;
+  }
+  float t = p1*0.3 + 0.02;
+  return max(abs(length(q) - (1.0 - t)) - t, -q.y);
+}
+vec3 sdfNormal(int i, int shape, vec3 q){
+  const vec2 k = vec2(1.0, -1.0);
+  const float e = 0.0008;
+  return normalize(k.xyy*sdfObj(i, shape, q + k.xyy*e) + k.yyx*sdfObj(i, shape, q + k.yyx*e)
+                 + k.yxy*sdfObj(i, shape, q + k.yxy*e) + k.xxx*sdfObj(i, shape, q + k.xxx*e));
+}
+
+// t piu' vicino > eps, normale esterna (mondo) e punto locale in metri
+bool hitObject(int i, vec3 ro, vec3 rd, out float tOut, out vec3 nOut, out vec3 lp){
+  vec4 P = OT(i, 0), Sc = OT(i, 1);
+  vec3 s = Sc.xyz;
+  mat3 M = mat3(OT(i, 2).xyz, OT(i, 3).xyz, OT(i, 4).xyz);
+  vec3 lo = (M * (ro - P.xyz)) / s;
   vec3 ld = (M * rd) / s;
   float eps = 0.001 * min(s.x, min(s.y, s.z));
-  int shape = int(uObjPos[i].w + 0.5);
+  int shape = int(P.w + 0.5);
   float t = INF; vec3 nl = vec3(0);
   if (shape == 0){
     float a = dot(ld, ld), b = dot(lo, ld), c = dot(lo, lo) - 1.0, h = b*b - a*c;
@@ -241,7 +299,7 @@ bool hitObject(int i, vec3 ro, vec3 rd, out float tOut, out vec3 nOut){
     if (tn > eps){ t = tn; nl = -sign(ld) * step(tmn.yzx, tmn) * step(tmn.zxy, tmn); }
     else if (tf > eps){ t = tf; nl = sign(ld) * step(tmx, tmx.yzx) * step(tmx, tmx.zxy); }
     else return false;
-  } else {
+  } else if (shape == 2){
     float a = dot(ld.xz, ld.xz);
     if (a > 1e-12){
       float b = dot(lo.xz, ld.xz), c = dot(lo.xz, lo.xz) - 1.0, h = b*b - a*c;
@@ -263,18 +321,39 @@ bool hitObject(int i, vec3 ro, vec3 rd, out float tOut, out vec3 nOut){
       }
     }
     if (t >= INF) return false;
+  } else {
+    // forme a distanza: si cammina dentro il cubo unitario che le contiene
+    vec3 inv = 1.0 / ld;
+    vec3 t0 = (-vec3(1.002) - lo)*inv, t1 = (vec3(1.002) - lo)*inv;
+    vec3 tmn = min(t0, t1), tmx = max(t0, t1);
+    float tn = max(max(tmn.x, tmn.y), tmn.z), tf = min(min(tmx.x, tmx.y), tmx.z);
+    if (tn > tf || tf < eps) return false;
+    float il = 1.0 / length(ld);
+    float tt = max(tn, eps);
+    float sg = sdfObj(i, shape, lo + ld*tt) < 0.0 ? -1.0 : 1.0;
+    bool hit = false;
+    for (int k = 0; k < 160; k++){
+      float d = sg * sdfObj(i, shape, lo + ld*tt);
+      if (d < 0.0004){ hit = true; break; }
+      tt += d * il;
+      if (tt > tf) break;
+    }
+    if (!hit) return false;
+    t = tt;
+    nl = sdfNormal(i, shape, lo + ld*t);
   }
   tOut = t;
+  lp = (lo + ld*t) * s;
   nOut = normalize((nl / s) * M);
   return true;
 }
 
 // ---------- scena ----------
 // id: 0 cielo, 1 terreno, 2 suolo, 3 acqua, 10+i oggetti
-struct Hit { float t; vec3 n; int id; int sub; };
+struct Hit { float t; vec3 n; int id; int sub; vec3 lp; };
 
 Hit traceScene(vec3 ro, vec3 rd, int steps){
-  Hit h; h.t = INF; h.id = 0; h.sub = 0; h.n = vec3(0,1,0);
+  Hit h; h.t = INF; h.id = 0; h.sub = 0; h.n = vec3(0,1,0); h.lp = vec3(0);
   float t;
   for (int i = 0; i < MAX_TER; i++){
     if (i >= uTerCount) break;
@@ -290,8 +369,8 @@ Hit traceScene(vec3 ro, vec3 rd, int steps){
   }
   for (int i = 0; i < MAX_OBJ; i++){
     if (i >= uObjCount) break;
-    vec3 n;
-    if (hitObject(i, ro, rd, t, n) && t < h.t){ h.t = t; h.n = n; h.id = 10 + i; }
+    vec3 n, lp;
+    if (hitObject(i, ro, rd, t, n, lp) && t < h.t){ h.t = t; h.n = n; h.id = 10 + i; h.lp = lp; }
   }
   return h;
 }
@@ -408,13 +487,43 @@ vec3 waterSigma(){
 
 // ---------- materiali ----------
 // tipo: 0 diffuso, 1 metallo, 2 vetro, 3 luce
-struct Surf { vec3 albedo; vec3 n; int type; float rough; vec3 emit; };
+struct Surf { vec3 albedo; vec3 n; int type; float rough; vec3 emit; float mirror; float shine; };
+
+vec3 imageTex(vec2 uv, float layer){
+  vec3 c = texture(uImages, vec3(fract(uv), layer)).rgb;
+  return pow(c, vec3(2.2));
+}
+// motivi: 0 tinta unita, 1 scacchiera, 2 marmo psichedelico, 3 strisce, 4 sfumatura (yu -1..1), 5 immagine
+vec3 pattern(int pat, vec3 p, float sc, vec3 c1, vec3 c2, vec3 c3, float yu, vec2 uv, float img){
+  if (pat == 1){
+    vec3 q = floor(p / sc + 1e-3);
+    return mod(q.x + q.y + q.z, 2.0) < 0.5 ? c1 : c2;
+  }
+  if (pat == 2){
+    vec3 r = p / sc;
+    float n = texture(uNoise, r*0.13).r*0.55 + texture(uNoise, r*0.29).g*0.3 + texture(uNoise, r*0.61).r*0.15;
+    float v = sin((r.x*0.7 + r.y*0.45 + r.z*0.3) + n*11.0)*0.5 + 0.5;
+    return v < 0.5 ? mix(c1, c2, smoothstep(0.0, 0.5, v)) : mix(c2, c3, smoothstep(0.5, 1.0, v));
+  }
+  if (pat == 3) return fract(p.y / sc) < 0.5 ? c1 : c2;
+  if (pat == 4) return yu < 0.0 ? mix(c1, c2, yu + 1.0) : mix(c2, c3, yu);
+  if (pat == 5) return imageTex(uv, img);
+  return c1;
+}
 
 Surf groundSurf(vec3 p){
   Surf s; s.type = 0; s.rough = 1.0; s.emit = vec3(0); s.n = vec3(0,1,0);
+  s.mirror = uGroundPat.w; s.shine = uGroundShine;
+  int pat = int(uGroundPat.x + 0.5);
+  if (pat > 0){
+    float sc = uGroundPat.y;
+    s.albedo = pattern(pat, vec3(p.x, sc*0.5, p.z), sc, uGroundColor, uGroundColor2, uGroundColor3, 0.0, p.xz / (sc*8.0), uGroundPat.z);
+    s.albedo = clamp(s.albedo, 0.0, 0.95);
+    return s;
+  }
   float n1 = texture(uNoise, p*0.00055).r, n2 = texture(uNoise, p*0.0031).g, n3 = texture(uNoise, p*0.019).r;
   s.albedo = clamp(uGroundColor * (0.7 + 0.35*n1 + 0.25*n2) * (0.9 + 0.2*n3), 0.0, 0.95);
-  if (uStyle != 2){
+  if (uStyle != 2 && s.mirror < 0.01){
     vec4 nn = texture(uNoise, p*0.021);
     s.n = normalize(vec3(0,1,0) + vec3(nn.r - 0.5, 0.0, nn.b - 0.45)*0.25);
   }
@@ -422,7 +531,7 @@ Surf groundSurf(vec3 p){
 }
 
 Surf terrainSurf(int i, vec3 p, float dist){
-  Surf s; s.type = 0; s.rough = 1.0; s.emit = vec3(0);
+  Surf s; s.type = 0; s.rough = 1.0; s.emit = vec3(0); s.mirror = 0.0; s.shine = 0.0;
   vec4 P = uTerPos[i], S = uTerSize[i];
   vec3 q = rotY(p - P.xyz, -P.w);
   float flow = texture(uFlows, vec3(q.xz / S.xz + 0.5, S.w)).r;
@@ -457,11 +566,27 @@ Surf terrainSurf(int i, vec3 p, float dist){
   return s;
 }
 
-Surf objectSurf(int i, vec3 n){
-  Surf s; s.n = n; s.albedo = uObjMat[i].rgb; s.rough = uObjMat[i].w; s.emit = vec3(0);
-  int m = int(uObjScale[i].w + 0.5);
+Surf objectSurf(int i, vec3 n, vec3 lp){
+  vec4 c1 = OT(i, 5), c2 = OT(i, 6), c3 = OT(i, 7), pm = OT(i, 8), sc = OT(i, 1);
+  int shape = int(OT(i, 0).w + 0.5);
+  Surf s; s.n = n; s.rough = c1.w; s.emit = vec3(0); s.mirror = c2.w; s.shine = c3.w;
+  int pat = int(pm.x + 0.5);
+  vec2 uv = vec2(0);
+  vec3 lu = lp / sc.xyz;
+  if (pat == 5){
+    if (shape == 0 || shape == 9 || shape == 10){
+      vec3 d = normalize(lu);
+      uv = vec2(atan(d.z, d.x) / (2.0*PI) + 0.5, asin(clamp(d.y, -1.0, 1.0)) / PI + 0.5);
+    } else {
+      vec3 a = abs(lu);
+      uv = (a.x > a.y && a.x > a.z) ? lu.zy : (a.y > a.z ? lu.xz : lu.xy);
+      uv = uv*0.5 + 0.5;
+    }
+  }
+  s.albedo = pattern(pat, lp, max(pm.y, 1e-3), c1.rgb, c2.rgb, c3.rgb, clamp(lu.y, -1.0, 1.0), uv, pm.z);
+  int m = int(sc.w + 0.5);
   s.type = m;
-  if (m == 3) s.emit = uObjMat[i].rgb * uObjEmit[i];
+  if (m == 3) s.emit = s.albedo * pm.w;
   return s;
 }
 
@@ -474,10 +599,10 @@ bool shadowed(vec3 p, vec3 L, out vec3 tint){
   }
   for (int i = 0; i < MAX_OBJ; i++){
     if (i >= uObjCount) break;
-    vec3 n;
-    if (hitObject(i, p, L, t, n)){
-      int m = int(uObjScale[i].w + 0.5);
-      if (m == 2) tint *= uObjMat[i].rgb*0.85; else if (m != 3) return true;
+    vec3 n, lp;
+    if (hitObject(i, p, L, t, n, lp)){
+      int m = int(OT(i, 1).w + 0.5);
+      if (m == 2) tint *= OT(i, 5).rgb*0.85; else if (m != 3) return true;
     }
   }
   return false;
@@ -548,7 +673,7 @@ vec3 radiance(vec3 ro, vec3 rd){
     }
 
     Surf s;
-    if (h.id >= 10) s = objectSurf(h.id - 10, h.n);
+    if (h.id >= 10) s = objectSurf(h.id - 10, h.n, h.lp);
     else if (h.id == 2) s = groundSurf(p);
     else s = terrainSurf(h.sub, p, h.t);
 
@@ -588,8 +713,18 @@ vec3 radiance(vec3 ro, vec3 rd){
       continue;
     }
 
+    // superficie in parte a specchio (pavimenti lucidi, plastica laccata)
+    if (s.mirror > 0.0 && rnd() < s.mirror){
+      rd = reflect(rd, n); ro = p + n*eps;
+      if (s.shine > 0.0) T *= mix(vec3(1.0), s.albedo, 0.25);
+      spec = true;
+      continue;
+    }
+
     // diffuso
     vec3 sp = p + n*eps;
+    // riflesso brillante del sole (Blinn-Phong): il puntino di luce delle sfere anni '90
+    float shExp = 12.0 + s.shine*s.shine*500.0;
     if (uStyle == 0){
       // fotorealistico: sole con ombre morbide + luce indiretta
       vec3 ld = coneDir(uSunDir, cos(uSunSize));
@@ -601,6 +736,7 @@ vec3 radiance(vec3 ro, vec3 rd){
           if (inWater) E *= exp(-waterSigma() * max(uWaterLevel - p.y, 0.0) / max(ld.y, 0.1));
           if (uFogDensity > 0.0) E *= exp(-fogOD(sp, ld, 30000.0));
           L += T * s.albedo / PI * E * ndl;
+          if (s.shine > 0.0) L += T * E * s.shine * 0.2 * (shExp + 8.0) / (8.0*PI) * pow(max(dot(n, normalize(ld - rd)), 0.0), shExp) * ndl;
         }
       }
       T *= s.albedo;
@@ -626,9 +762,18 @@ vec3 radiance(vec3 ro, vec3 rd){
         s.albedo = clamp(mix(vec3(lum), s.albedo, 1.45), 0.0, 1.0);
         amb = vec3(dot(amb, vec3(0.333))) * mix(vec3(0.75, 0.8, 1.0), vec3(1.0), 0.4);
       }
+      if (uStyle == 1){
+        float lum = dot(s.albedo, vec3(0.299, 0.587, 0.114));
+        s.albedo = clamp(mix(vec3(lum), s.albedo, 1.2), 0.0, 1.0);
+      }
       vec3 E = uSunColor * tint * lit;
       if (inWater) E *= exp(-waterSigma() * max(uWaterLevel - p.y, 0.0) / max(uSunDir.y, 0.1));
       L += T * s.albedo * (E / PI + amb * 0.55);
+      if (s.shine > 0.0 && lit > 0.0){
+        float hl = pow(max(dot(n, normalize(uSunDir - rd)), 0.0), shExp);
+        if (uStyle == 2) hl = step(0.5, hl);
+        L += T * uSunColor * tint * s.shine * 0.2 * (shExp + 8.0) / (8.0*PI) * hl * (uStyle == 2 ? 0.05 : 1.0);
+      }
       break;
     }
   }

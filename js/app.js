@@ -28,8 +28,33 @@ const ATMOS = {
   verde: { name: 'Aliena verde', r: [3e-6, 12e-6, 6e-6] },
 };
 const FORMATS = { '16:9': [16, 9], '3:2': [3, 2], '4:3': [4, 3], '1:1': [1, 1], '4:5': [4, 5], '9:16': [9, 16], '21:9': [21, 9] };
-const SHAPES = { 0: 'Sfera', 1: 'Cubo', 2: 'Cilindro' };
-const MATERIALS = { 0: 'Opaco', 1: 'Metallo', 2: 'Vetro', 3: 'Luce' };
+const SHAPES = { 0: 'Sfera', 1: 'Cubo', 2: 'Cilindro', 3: 'Toro', 4: 'Cono', 5: 'Piramide', 6: 'Capsula', 7: 'Anello', 8: 'Arco', 9: 'Blob', 10: 'Cupola' };
+// parametro di forma: etichetta e valore iniziale
+const SHAPE_PARAM = {
+  3: ['Spessore', 0.3], 4: ['Punta (0 = appuntita)', 0], 6: ['Rotondità', 0.5], 7: ['Larghezza della fascia', 0.35],
+  8: ['Spessore', 0.2], 9: ['Morbidezza delle unioni', 0.45], 10: ['Spessore della parete', 0.15],
+};
+const MATERIALS = { 0: 'Opaco / plastica', 1: 'Metallo', 2: 'Vetro', 3: 'Luce' };
+const PATTERNS = { 0: 'Tinta unita', 1: 'Scacchiera', 2: 'Marmo psichedelico', 3: 'Strisce', 4: 'Sfumatura', 5: 'Immagine' };
+// materiali pronti: si applicano all'oggetto selezionato (la scala del motivo si adatta alla grandezza)
+const MAT_PRESETS = [
+  { name: 'Cromo', m: { material: 1, pattern: 0, color: '#e8eaee', rough: 0.02 } },
+  { name: 'Oro', m: { material: 1, pattern: 0, color: '#e6b450', rough: 0.06 } },
+  { name: 'Vetro', m: { material: 2, pattern: 0, color: '#eef6ff', rough: 0 } },
+  { name: 'Vetro rosa', m: { material: 2, pattern: 0, color: '#ff9ad5', rough: 0 } },
+  { name: 'Plastica lucida', m: { material: 0, pattern: 0, color: '#d23a3a', shine: 0.85, mirror: 0.08 } },
+  { name: 'Scacchiera', m: { material: 0, pattern: 1, color: '#d01f1f', color2: '#f4f4f4', shine: 0.7, mirror: 0.12, _ps: 0.5 } },
+  { name: 'Marmo psichedelico', m: { material: 0, pattern: 2, color: '#ff3fb4', color2: '#3fe0ff', color3: '#fff23f', shine: 0.6, mirror: 0.05, _ps: 0.6 } },
+  { name: 'Strisce', m: { material: 0, pattern: 3, color: '#2a4dff', color2: '#ffffff', shine: 0.6, _ps: 0.25 } },
+  { name: 'Pietra', m: { material: 0, pattern: 2, color: '#8a8580', color2: '#5c5650', color3: '#b5afa5', shine: 0, mirror: 0, _ps: 0.8 } },
+  { name: 'Neon', m: { material: 3, pattern: 0, color: '#ff4fd8', emit: 10 } },
+];
+const GROUND_PRESETS = [
+  { name: 'Terra', m: { pattern: 0, color: '#6e6650', mirror: 0, shine: 0 } },
+  { name: 'Scacchiera', m: { pattern: 1, color: '#1d2fd0', color2: '#f2f2f2', pscale: 25, mirror: 0.3, shine: 0.6 } },
+  { name: 'Specchio', m: { pattern: 0, color: '#20242c', mirror: 0.85, shine: 0.8 } },
+  { name: 'Marmo', m: { pattern: 2, color: '#ff3fb4', color2: '#5b2bd6', color3: '#3fe0ff', pscale: 60, mirror: 0.15, shine: 0.4 } },
+];
 const STYLES = [
   { name: 'Fotorealistico', desc: 'Luce indiretta e ombre morbide. Il più lento.', bounces: 4 },
   { name: 'Classico', desc: 'Ombre nette e colori pieni, da raytracer anni ’90.', bounces: 6 },
@@ -44,6 +69,14 @@ const ICONS = {
   0: '<circle cx="12" cy="12" r="8"/>',
   1: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9zM4 7.5l8 4.5 8-4.5M12 12v9"/>',
   2: '<ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/>',
+  3: '<ellipse cx="12" cy="12" rx="9" ry="5"/><ellipse cx="12" cy="12" rx="4" ry="2"/>',
+  4: '<path d="M12 3l7 16H5z"/><ellipse cx="12" cy="19" rx="7" ry="2"/>',
+  5: '<path d="M12 3l9 15H3zM12 3l2 15"/>',
+  6: '<rect x="7" y="3" width="10" height="18" rx="5"/>',
+  7: '<ellipse cx="12" cy="12" rx="10" ry="4"/><ellipse cx="12" cy="12" rx="6" ry="2"/>',
+  8: '<path d="M4 20V12a8 8 0 0 1 16 0v8M8 20v-8a4 4 0 0 1 8 0v8"/>',
+  9: '<circle cx="9" cy="10" r="5"/><circle cx="16" cy="15" r="4"/>',
+  10: '<path d="M3 17a9 9 0 0 1 18 0zM2 17h20"/>',
   light: '<circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>',
 };
 
@@ -59,18 +92,49 @@ function mkTerrain(o) {
 }
 function withPalette(t, key) { const p = PALETTES[key]; t.palette = key; t.snowLine = p.snowLine; t.rockSlope = p.rockSlope; return t; }
 const mkWater = o => Object.assign({ id: uid(), type: 'water', name: 'Acqua', y: 200, color: '#1f5868', clarity: 0.4, waves: 0.4 }, o);
-const mkGround = o => Object.assign({ id: uid(), type: 'ground', name: 'Suolo', y: 0, color: '#6e6650' }, o);
+const mkGround = o => Object.assign({ id: uid(), type: 'ground', name: 'Suolo', y: 0, color: '#6e6650', color2: '#f2f2f2', color3: '#3fe0ff', pattern: 0, pscale: 25, mirror: 0, shine: 0, image: null }, o);
 const mkClouds = o => Object.assign({ id: uid(), type: 'clouds', name: 'Nuvole', y: 2900, thickness: 1400, cover: 0.4, density: 0.5, scale: 7000 }, o);
 function mkPrim(shape, o) {
-  return Object.assign({
+  const p = Object.assign({
     id: uid(), type: 'prim', shape, name: SHAPES[shape], x: 0, y: 0, z: 0, sx: 100, sy: 100, sz: 100, rx: 0, ry: 0, rz: 0,
-    material: 0, color: '#c9c2b8', rough: 0.05, emit: 8,
+    material: 0, color: '#c9c2b8', color2: '#f4f4f4', color3: '#3fe0ff', pattern: 0, pscale: 0, image: null,
+    rough: 0.05, emit: 8, shine: 0.3, mirror: 0, p1: SHAPE_PARAM[shape] ? SHAPE_PARAM[shape][1] : 0.3, seed: 1 + Math.floor(Math.random() * 9999),
   }, o);
+  if (!p.pscale) p.pscale = Math.max(0.05, Math.round(Math.max(p.sx, p.sy, p.sz) * 0.5 * 100) / 100);
+  return p;
+}
+// completa gli oggetti salvati con una versione precedente
+function upgradeObj(o) {
+  if (o.type === 'prim') {
+    const d = mkPrim(o.shape, {});
+    for (const k of Object.keys(d)) if (o[k] === undefined && k !== 'id' && k !== 'name') o[k] = d[k];
+    if (!o.pscale) o.pscale = Math.max(0.05, Math.max(o.sx, o.sy, o.sz) * 0.5);
+  } else if (o.type === 'ground') {
+    const d = mkGround({});
+    for (const k of Object.keys(d)) if (o[k] === undefined && k !== 'id' && k !== 'name') o[k] = d[k];
+  }
+  return o;
+}
+// sfere del blob (spazio unitario), uguali per vista 3D e path tracer
+function blobBalls(seed) {
+  const r = mulberry32(seed | 0);
+  const n = 3 + Math.floor(r() * 3);
+  const balls = [];
+  for (let i = 0; i < n; i++) {
+    const rad = 0.28 + r() * 0.2;
+    const lim = 1 - rad;
+    let x, y, z;
+    do { x = r() * 2 - 1; y = r() * 2 - 1; z = r() * 2 - 1; } while (x * x + y * y + z * z > 1);
+    const k = i === 0 ? 0 : lim * 0.85;
+    balls.push([x * k, y * k, z * k, rad]);
+  }
+  return balls;
 }
 
 function baseState() {
   return {
     objects: [],
+    images: [],   // { id, name, data: dataURL 512x512 }
     sky: { sunElev: 22, sunAzim: 200, sunSize: 0.8, atmos: 'terra', clarity: 0.7, fog: 0.25, fogHeight: 900, skyLight: 1.8 },
     camera: { pos: [6000, 1500, 6000], target: [0, 300, 0], focal: 35, blur: 0, focus: 0, snap: null },
     render: { format: '16:9', size: 1920, samples: 256, style: 0, exposure: 1, contrast: 1, saturation: 1, vignette: 0.25, detail: 512 },
@@ -142,6 +206,29 @@ const PRESETS = [
         mkPrim(0, { name: 'Sfera cromata', material: 1, color: '#e6e8ec', sx: 120, sy: 120, sz: 120, _land: 30 })];
       Object.assign(s.sky, { atmos: 'densa', sunElev: 4, sunAzim: 200, clarity: 0.55, fog: 0.15 });
       s.camera.snap = camSnap(0, 0.04, 700);
+      return s;
+    }
+  },
+  {
+    name: 'Silicon Dreams', desc: 'Cromo, scacchiera e un pianeta: anni ’90', make() {
+      const s = baseState();
+      const P = (shape, o) => mkPrim(shape, o);
+      s.objects = [
+        mkGround({ name: 'Pavimento', pattern: 1, color: '#1d2fd0', color2: '#f2f2f2', pscale: 25, mirror: 0.3, shine: 0.6 }),
+        P(0, { name: 'Sfera cromata', material: 1, color: '#e8eaee', rough: 0.02, sx: 40, sy: 40, sz: 40, x: 0, z: 0, y: 40 }),
+        P(0, { name: 'Sfera a scacchi', material: 0, pattern: 1, color: '#d01f1f', color2: '#f4f4f4', shine: 0.7, mirror: 0.12, pscale: 12, sx: 26, sy: 26, sz: 26, x: -75, z: 40, y: 26 }),
+        P(3, { name: 'Toro', material: 1, color: '#c8ccff', rough: 0.03, p1: 0.28, sx: 34, sy: 34, sz: 34, x: 70, z: 30, y: 34, rx: 70, rz: 20 }),
+        P(9, { name: 'Blob', material: 1, color: '#dfe3ea', rough: 0.02, p1: 0.5, seed: 42, sx: 30, sy: 30, sz: 30, x: 40, z: -70, y: 34 }),
+        P(4, { name: 'Cristallo', material: 2, color: '#9fd8ff', p1: 0, sx: 10, sy: 45, sz: 10, x: -40, z: -60, y: 45 }),
+        P(5, { name: 'Piramide', material: 0, pattern: 2, color: '#ff3fb4', color2: '#3fe0ff', color3: '#fff23f', pscale: 20, shine: 0.6, sx: 22, sy: 22, sz: 22, x: -110, z: -40, y: 22 }),
+        P(8, { name: 'Arco', material: 0, pattern: 0, color: '#f2efe8', shine: 0.5, p1: 0.12, sx: 60, sy: 60, sz: 60, x: 10, z: -150, y: 0 }),
+        P(0, { name: 'Pianeta', material: 0, pattern: 2, color: '#f08a3c', color2: '#7a3cb4', color3: '#ffe2a8', pscale: 2500, shine: 0, sx: 2600, sy: 2600, sz: 2600, x: -12000, z: -26000, y: 3600 }),
+        P(7, { name: 'Anelli', material: 0, pattern: 3, color: '#f4d9a8', color2: '#b89a70', pscale: 600, shine: 0, p1: 0.45, sx: 5300, sy: 5300, sz: 5300, x: -12000, z: -26000, y: 3600, rx: 14, rz: -16 }),
+      ];
+      Object.assign(s.sky, { sunElev: 28, sunAzim: 30, atmos: 'terra', clarity: 0.85, fog: 0.05, skyLight: 2.2 });
+      s.render.style = 1;
+      s.render.format = '4:3';
+      s.camera.snap = camSnap(0.15, 0.12, 330);
       return s;
     }
   },
@@ -252,6 +339,137 @@ const GEO = {
 };
 const PLANE_GEO = new THREE.PlaneGeometry(400000, 400000).rotateX(-Math.PI / 2);
 const WIRE_COLOR = 0xb4bcc6, SEL_COLOR = 0xf2b45a;
+const isShared = g => g === PLANE_GEO || Object.values(GEO).includes(g);
+
+// geometria della vista 3D, con le stesse misure delle forme del path tracer (spazio unitario)
+function primGeoKey(o) { return o.shape + '|' + (o.shape >= 3 ? o.p1 : '') + '|' + (o.shape === 9 ? o.seed : ''); }
+function primGeometry(o) {
+  const p1 = o.p1;
+  switch (o.shape) {
+    case 0: case 1: case 2: return GEO[o.shape];
+    case 3: { const r = clamp(p1, 0.05, 0.5); return new THREE.TorusGeometry(1 - r, r, 24, 72).rotateX(Math.PI / 2); }
+    case 4: return new THREE.CylinderGeometry(clamp(p1, 0, 1), 1, 2, 48);
+    case 5: return new THREE.ConeGeometry(Math.SQRT2, 2, 4).rotateY(Math.PI / 4);
+    case 6: { const r = clamp(p1, 0.1, 1); return new THREE.CapsuleGeometry(r, Math.max(0.001, 2 * (1 - r)), 12, 32); }
+    case 7: { const w = p1 * 0.45 + 0.02; return new THREE.RingGeometry(1 - 2 * w, 1, 72).rotateX(-Math.PI / 2); }
+    case 8: { const r = clamp(p1, 0.05, 0.5); return new THREE.TorusGeometry(1 - r, r, 20, 48, Math.PI); }
+    case 9: return mergeSpheres(blobBalls(o.seed));
+    default: return new THREE.SphereGeometry(1, 48, 16, 0, Math.PI * 2, 0, Math.PI / 2);
+  }
+}
+// unione semplice di sfere (anteprima del blob)
+function mergeSpheres(balls) {
+  const pos = [], nor = [], uv = [], idx = [];
+  for (const [x, y, z, r] of balls) {
+    const g = new THREE.SphereGeometry(r, 32, 16);
+    const base = pos.length / 3;
+    const p = g.getAttribute('position'), n = g.getAttribute('normal'), u = g.getAttribute('uv');
+    for (let i = 0; i < p.count; i++) { pos.push(p.getX(i) + x, p.getY(i) + y, p.getZ(i) + z); nor.push(n.getX(i), n.getY(i), n.getZ(i)); uv.push(u.getX(i), u.getY(i)); }
+    const ix = g.getIndex();
+    for (let i = 0; i < ix.count; i++) idx.push(ix.getX(i) + base);
+    g.dispose();
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  return g;
+}
+
+// ---------- immagini dell'utente ----------
+const imgCanvas = new Map();   // id -> canvas IMG_SIZE
+function imageLayer(id) { const i = S.images.findIndex(im => im.id === id); return i < 0 ? 0 : i; }
+function loadImages() {
+  // ricarica tutte le immagini nei layer (l'indice nell'elenco e' il layer)
+  S.images.forEach((im, i) => {
+    const done = c => { R.uploadImage(i, c); resetTrace(); refreshAllLooks(); };
+    if (imgCanvas.has(im.id)) { done(imgCanvas.get(im.id)); return; }
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = c.height = IMG_SIZE;
+      c.getContext('2d').drawImage(img, 0, 0, IMG_SIZE, IMG_SIZE);
+      imgCanvas.set(im.id, c);
+      texCache.clear();
+      done(c);
+    };
+    img.src = im.data;
+  });
+}
+function addImageFromFile(file, cb) {
+  if (S.images.length >= MAX_IMG) { toast(`Al massimo ${MAX_IMG} immagini: sostituisco la più vecchia`); const old = S.images.shift(); imgCanvas.delete(old.id); }
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    const c = document.createElement('canvas');
+    c.width = c.height = IMG_SIZE;
+    c.getContext('2d').drawImage(img, 0, 0, IMG_SIZE, IMG_SIZE);
+    URL.revokeObjectURL(url);
+    const id = uid();
+    S.images.push({ id, name: file.name.replace(/\.[^.]+$/, '').slice(0, 30), data: c.toDataURL('image/jpeg', 0.85) });
+    imgCanvas.set(id, c);
+    texCache.clear();
+    loadImages();
+    cb(id);
+  };
+  img.onerror = () => { URL.revokeObjectURL(url); toast('Immagine non leggibile'); };
+  img.src = url;
+}
+const imgPicker = document.createElement('input');
+imgPicker.type = 'file'; imgPicker.accept = 'image/*'; imgPicker.hidden = true;
+document.body.appendChild(imgPicker);
+let imgPickerCb = null;
+imgPicker.addEventListener('change', () => { const f = imgPicker.files[0]; if (f && imgPickerCb) addImageFromFile(f, imgPickerCb); imgPicker.value = ''; });
+function pickImage(cb) { imgPickerCb = cb; imgPicker.click(); }
+
+// texture dei motivi per la vista "Materiali" (approssimano quelli del path tracer)
+const texCache = new Map();
+function patternTexture(o) {
+  if (!o.pattern) return null;
+  const key = [o.pattern, o.color, o.color2, o.color3, o.image].join('|');
+  if (texCache.has(key)) return texCache.get(key);
+  let c;
+  if (o.pattern === 5) {
+    c = imgCanvas.get(o.image);
+    if (!c) return null;
+  } else {
+    c = document.createElement('canvas');
+    const ctx = c.getContext('2d');
+    if (o.pattern === 1) { c.width = c.height = 2; ctx.fillStyle = o.color; ctx.fillRect(0, 0, 2, 2); ctx.fillStyle = o.color2; ctx.fillRect(1, 0, 1, 1); ctx.fillRect(0, 1, 1, 1); }
+    else if (o.pattern === 3) { c.width = 1; c.height = 2; ctx.fillStyle = o.color; ctx.fillRect(0, 0, 1, 1); ctx.fillStyle = o.color2; ctx.fillRect(0, 1, 1, 1); }
+    else if (o.pattern === 4) { c.width = 1; c.height = 64; const g = ctx.createLinearGradient(0, 64, 0, 0); g.addColorStop(0, o.color); g.addColorStop(0.5, o.color2); g.addColorStop(1, o.color3); ctx.fillStyle = g; ctx.fillRect(0, 0, 1, 64); }
+    else {
+      const N = 128; c.width = c.height = N;
+      const img = ctx.createImageData(N, N), noise = makePerlin2D(7);
+      const h2r = h => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+      const a = h2r(o.color), b = h2r(o.color2), d = h2r(o.color3);
+      for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+        const n = noise(x / 40, y / 40) * 0.6 + noise(x / 15, y / 15) * 0.25;
+        const v = Math.sin(x * 0.06 + y * 0.03 + n * 9) * 0.5 + 0.5;
+        const k = (y * N + x) * 4;
+        for (let ch = 0; ch < 3; ch++) img.data[k + ch] = v < 0.5 ? a[ch] + (b[ch] - a[ch]) * v * 2 : b[ch] + (d[ch] - b[ch]) * (v - 0.5) * 2;
+        img.data[k + 3] = 255;
+      }
+      ctx.putImageData(img, 0, 0);
+    }
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = o.pattern === 2 ? THREE.MirroredRepeatWrapping : THREE.RepeatWrapping;
+  if (o.pattern === 1 || o.pattern === 3) { t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestMipmapLinearFilter; }
+  texCache.set(key, t);
+  return t;
+}
+function patternMap(o, size) {
+  const base = patternTexture(o);
+  if (!base) return null;
+  const t = base.clone();
+  const reps = o.pattern === 4 || o.pattern === 5 ? 1 : Math.max(1, Math.round(size / Math.max(o.pscale, 0.01)));
+  t.repeat.set(o.pattern === 3 ? 1 : reps, o.pattern === 4 ? 1 : reps);
+  t.needsUpdate = true;
+  return t;
+}
 
 function makeNode(o) {
   const root = new THREE.Group();
@@ -263,8 +481,10 @@ function makeNode(o) {
     node.wire = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ wireframe: true, color: WIRE_COLOR }));
     root.add(node.mesh, node.wire);
   } else if (o.type === 'prim') {
-    node.mesh = new THREE.Mesh(GEO[o.shape], new THREE.MeshStandardMaterial());
-    node.wire = new THREE.Mesh(GEO[o.shape], new THREE.MeshBasicMaterial({ wireframe: true, color: WIRE_COLOR }));
+    const g = primGeometry(o);
+    node.geoKey = primGeoKey(o);
+    node.mesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial());
+    node.wire = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ wireframe: true, color: WIRE_COLOR }));
     root.add(node.mesh, node.wire);
   } else {
     node.mesh = new THREE.Mesh(PLANE_GEO, new THREE.MeshStandardMaterial({ side: THREE.DoubleSide }));
@@ -284,8 +504,8 @@ function removeNode(id) {
   const n = nodes.get(id);
   if (!n) return;
   world.remove(n.root);
-  if (n.mesh && n.mesh.geometry !== PLANE_GEO && !Object.values(GEO).includes(n.mesh.geometry)) n.mesh.geometry.dispose();
-  if (n.wire && n.wire.geometry !== n.mesh.geometry && !Object.values(GEO).includes(n.wire.geometry)) n.wire.geometry.dispose();
+  if (n.mesh && !isShared(n.mesh.geometry)) n.mesh.geometry.dispose();
+  if (n.wire && n.wire.geometry !== n.mesh.geometry && !isShared(n.wire.geometry)) n.wire.geometry.dispose();
   nodes.delete(id);
 }
 
@@ -298,7 +518,12 @@ function syncNode(o) {
     r.position.set(o.x, o.y, o.z); r.rotation.set(0, o.rot, 0); r.scale.set(o.w, o.h, o.d);
   } else if (o.type === 'prim') {
     r.position.set(o.x, o.y, o.z); r.rotation.set(o.rx * DEG, o.ry * DEG, o.rz * DEG); r.scale.set(o.sx, o.sy, o.sz);
-    if (n.mesh.geometry !== GEO[o.shape]) { n.mesh.geometry = GEO[o.shape]; n.wire.geometry = GEO[o.shape]; }
+    const key = primGeoKey(o);
+    if (n.geoKey !== key) {
+      if (!isShared(n.mesh.geometry)) n.mesh.geometry.dispose();
+      const g = primGeometry(o);
+      n.mesh.geometry = g; n.wire.geometry = g; n.geoKey = key;
+    }
   } else {
     r.position.set(0, o.y, 0);
   }
@@ -321,20 +546,28 @@ function applyNodeLook(o, n) {
   }
   if (!(m instanceof THREE.MeshStandardMaterial)) { m.dispose(); m = n.mesh.material = new THREE.MeshStandardMaterial(); }
   m.vertexColors = false; m.transparent = false; m.opacity = 1; m.metalness = 0; m.roughness = 0.85;
-  m.emissive.setHex(0); m.depthWrite = true; m.side = o.type === 'water' || o.type === 'ground' ? THREE.DoubleSide : THREE.FrontSide;
+  if (m.map) { m.map.dispose(); m.map = null; }
+  m.emissiveMap = null;
+  m.emissive.setHex(0); m.depthWrite = true;
+  m.side = o.type === 'water' || o.type === 'ground' || (o.type === 'prim' && (o.shape === 7 || o.shape === 10)) ? THREE.DoubleSide : THREE.FrontSide;
   if (mode === 'solid') {
     m.color.setHex(o.type === 'water' ? 0x8496a6 : o.type === 'ground' ? 0x8a8a8a : 0xc4c4c4);
     if (o.type === 'water') { m.transparent = true; m.opacity = 0.55; }
   } else if (mode === 'material') {
     if (o.type === 'terrain') { m.color.setHex(0xffffff); m.vertexColors = true; m.roughness = 1; }
-    else if (o.type === 'ground') { m.color.setRGB(...lin(o.color)); m.roughness = 1; }
+    else if (o.type === 'ground') {
+      const map = patternMap(o, 400000 / 2);
+      if (map) { m.map = map; m.color.setHex(0xffffff); } else m.color.setRGB(...lin(o.color));
+      m.roughness = o.mirror > 0 ? clamp(1 - o.mirror * 1.1, 0.05, 1) : 1; m.metalness = o.mirror * 0.6;
+    }
     else if (o.type === 'water') { m.color.setRGB(...lin(o.color).map(v => v * 0.8)); m.roughness = 0.06; m.metalness = 0.1; m.transparent = true; m.opacity = 0.5 + o.clarity * -0.25 + 0.3; }
     else {
-      m.color.setRGB(...lin(o.color));
+      const map = patternMap(o, 2 * Math.max(o.sx, o.sy, o.sz));
+      if (map) { m.map = map; m.color.setHex(0xffffff); } else m.color.setRGB(...lin(o.color));
       if (o.material === 1) { m.metalness = 1; m.roughness = Math.max(0.03, o.rough); }
       else if (o.material === 2) { m.transparent = true; m.opacity = 0.3; m.roughness = 0.05; m.metalness = 0.2; }
-      else if (o.material === 3) { m.emissive.setRGB(...lin(o.color)); m.emissiveIntensity = Math.min(3, o.emit / 4); }
-      else m.roughness = 0.75;
+      else if (o.material === 3) { m.emissive.setRGB(...lin(o.color)); m.emissiveIntensity = Math.min(3, o.emit / 4); if (map) m.emissiveMap = map; }
+      else { m.roughness = clamp(0.8 - o.shine * 0.7, 0.08, 1); m.metalness = o.mirror * 0.5; }
     }
   }
   m.needsUpdate = true;
@@ -608,32 +841,41 @@ function buildScene(final) {
     terMat.set([o.snowLine, o.rockSlope], i * 2);
     terLow.set(lin(p.low), i * 3); terMid.set(lin(p.mid), i * 3); terRock.set(lin(p.rock), i * 3); terSnow.set(lin(p.snow), i * 3); terSand.set(lin(p.sand), i * 3);
   });
-  const O = MAX_OBJ;
-  const objPos = new Float32Array(O * 4), objScale = new Float32Array(O * 4), objMat = new Float32Array(O * 4), objRot = new Float32Array(O * 9), objEmit = new Float32Array(O);
-  const pr = prims().slice(0, O);
+  // dati degli oggetti in texture (vedi l'elenco delle righe nello shader)
+  const objData = new Float32Array(OBJ_W * MAX_OBJ * 4);
+  const pr = prims().slice(0, MAX_OBJ);
   const m4 = new THREE.Matrix4(), m3 = new THREE.Matrix3(), eul = new THREE.Euler();
   pr.forEach((o, i) => {
-    objPos.set([o.x, o.y, o.z, o.shape], i * 4);
-    objScale.set([o.sx, o.sy, o.sz, o.material], i * 4);
-    objMat.set([...lin(o.color), o.rough], i * 4);
+    const put = (k, a) => objData.set(a, (i * OBJ_W + k) * 4);
+    put(0, [o.x, o.y, o.z, o.shape]);
+    put(1, [o.sx, o.sy, o.sz, o.material]);
     eul.set(o.rx * DEG, o.ry * DEG, o.rz * DEG, 'XYZ');
-    m3.setFromMatrix4(m4.makeRotationFromEuler(eul)).transpose();
-    objRot.set(m3.elements, i * 9);
-    objEmit[i] = o.emit;
+    const e = m3.setFromMatrix4(m4.makeRotationFromEuler(eul)).transpose().elements;
+    put(2, [e[0], e[1], e[2], 0]); put(3, [e[3], e[4], e[5], 0]); put(4, [e[6], e[7], e[8], 0]);
+    put(5, [...lin(o.color), o.rough]);
+    put(6, [...lin(o.color2), o.material === 0 ? o.mirror : 0]);
+    put(7, [...lin(o.color3), o.material === 0 ? o.shine : 0]);
+    const pat = o.pattern === 5 && !imgCanvas.has(o.image) ? 0 : o.pattern;
+    put(8, [pat, o.pscale, imageLayer(o.image), o.emit]);
+    put(9, [o.p1, 0, 0, 0]);
+    if (o.shape === 9) blobBalls(o.seed).forEach((b, j) => put(10 + j, b));
   });
   const gr = firstOf('ground'), wa = firstOf('water'), cl = firstOf('clouds');
+  const grPat = gr && !(gr.pattern === 5 && !imgCanvas.has(gr.image)) ? gr.pattern : 0;
   const sd = sunDir();
   const style = S.render.style;
   scene = {
     cam: cameraFor(final), style,
     terCount: terLayers.length, terPos, terSize, terMat, terLow, terMid, terRock, terSnow, terSand,
     groundOn: !!gr, groundY: gr ? gr.y : 0, groundColor: lin(gr ? gr.color : '#6e6650'),
+    groundColor2: lin(gr ? gr.color2 : '#f2f2f2'), groundColor3: lin(gr ? gr.color3 : '#3fe0ff'),
+    groundPat: [grPat, gr ? gr.pscale : 25, gr ? imageLayer(gr.image) : 0, gr ? gr.mirror : 0], groundShine: gr ? gr.shine : 0,
     waterOn: !!wa, waterLevel: wa ? wa.y : 0, waterClarity: wa ? wa.clarity : 0.5, waves: wa ? wa.waves : 0, waterColor: lin(wa ? wa.color : '#1f5868'),
     cloudCover: cl ? cl.cover : 0, cloudDensity: cl ? cl.density : 0.5, cloudBottom: cl ? cl.y : 3000, cloudTop: cl ? cl.y + cl.thickness : 4000, cloudScale: cl ? cl.scale : 7000,
     sunDir: sd, sunColor: sunColor(sd), sunSize: (style === 0 ? S.sky.sunSize : 0.3) * DEG, sunPower: SUN_POWER,
     rayleigh: ATMOS[S.sky.atmos].r, mie: mieCoef(), skyLight: S.sky.skyLight,
     fogDensity: S.sky.fog > 0 ? 0.000003 + Math.pow(S.sky.fog, 2) * 0.0005 : 0, fogFalloff: 1 / S.sky.fogHeight,
-    objCount: pr.length, objPos, objScale, objMat, objRot, objEmit,
+    objCount: pr.length, objData,
   };
   return scene;
 }
@@ -1092,17 +1334,29 @@ function create(kind) {
     withPalette(o, 'alpino');
   } else {
     if (prims().length >= MAX_OBJ) { toast(`Al massimo ${MAX_OBJ} oggetti`); return; }
-    const shape = kind === 'cube' ? 1 : kind === 'cylinder' ? 2 : 0;
+    const SH = { sphere: 0, cube: 1, cylinder: 2, torus: 3, cone: 4, pyramid: 5, capsule: 6, ring: 7, arch: 8, blob: 9, dome: 10, light: 0 };
+    const shape = SH[kind] ?? 0;
     const r = Math.round(clamp(dist * 0.06, 0.5, 5000) * 10) / 10;
     const light = kind === 'light';
+    const bright = ['#d23a3a', '#2a6dff', '#f2c230', '#2bbf6a', '#ff6fd0', '#7a4dff'];
     o = mkPrim(shape, {
       name: nextName(light ? 'Luce' : SHAPES[shape]), x: Math.round(tgt.x), z: Math.round(tgt.z), sx: light ? r * 0.4 : r, sy: light ? r * 0.4 : r, sz: light ? r * 0.4 : r,
-      material: light ? 3 : shape === 0 ? 1 : 0, color: light ? '#ffd9a0' : shape === 0 ? '#d8dde3' : '#c9c2b8',
+      material: light ? 3 : shape === 0 || shape === 3 || shape === 9 ? 1 : 0,
+      color: light ? '#ffd9a0' : shape === 0 || shape === 3 || shape === 9 ? '#d8dde3' : bright[Math.floor(Math.random() * bright.length)],
+      shine: 0.6,
     });
-    o.y = surfaceY(o.x, o.z) + o.sy + (light ? r * 2 : 0);
+    if (shape === 4) { o.sx = o.sz = r * 0.4; o.sy = r * 1.5; o.material = 2; o.color = '#9fd8ff'; o.pscale = r * 0.3; }
   }
   S.objects.push(o);
   makeNode(o);
+  if (o.type === 'prim') {
+    // appoggia al suolo (la luce resta sospesa)
+    o.y = 0; syncNode(o);
+    nodes.get(o.id).root.updateMatrixWorld(true);
+    const b = new THREE.Box3().setFromObject(nodes.get(o.id).mesh);
+    o.y = surfaceY(o.x, o.z, { exclude: o.id }) - b.min.y + (kind === 'light' ? o.sy * 5 : 0);
+    syncNode(o);
+  }
   if (o.type === 'terrain') scheduleGen(o, 0);
   if (o.type === 'water') recolorAll();
   layersDirty = true;
@@ -1141,6 +1395,7 @@ function duplicateObj(id) {
 }
 function landObj(o) {
   if (o.type === 'prim') {
+    nodes.get(o.id).root.updateMatrixWorld(true);
     const b = new THREE.Box3().setFromObject(nodes.get(o.id).mesh);
     const bottom = b.min.y;
     const s = surfaceY(o.x, o.z, { exclude: o.id });
@@ -1385,6 +1640,55 @@ const TABS = {
   },
 };
 
+// editor del materiale: oggetti e suolo
+function materialEditor(o, ground) {
+  const s = section('Materiale');
+  const chips = el('div', 'chips');
+  const presets = ground ? GROUND_PRESETS : MAT_PRESETS;
+  for (const p of presets) {
+    const b = el('button', 'chip', p.name);
+    b.type = 'button';
+    b.addEventListener('click', () => {
+      const m = Object.assign({ shine: 0.3, mirror: 0 }, p.m);
+      if (m._ps) { m.pscale = Math.max(0.05, Math.round(Math.max(o.sx, o.sy, o.sz) * m._ps * 100) / 100); delete m._ps; }
+      Object.assign(o, m);
+      onObj(o)(); renderTab();
+    });
+    chips.appendChild(b);
+  }
+  s.appendChild(chips);
+  if (!ground) select2(s, 'Tipo', bind(o, 'material'), MATERIALS, () => { onObj(o)(); renderTab(); });
+  select2(s, 'Motivo', bind(o, 'pattern'), ground ? { 0: 'Terra (rumore)', 1: 'Scacchiera', 2: 'Marmo psichedelico', 3: 'Strisce', 5: 'Immagine' } : PATTERNS, v => {
+    if (v === 5 && !o.image) {
+      if (S.images.length) o.image = S.images[S.images.length - 1].id;
+      else { pickImage(id => { o.image = id; onObj(o)(); renderTab(); }); }
+    }
+    onObj(o)(); renderTab();
+  });
+  const pat = o.pattern;
+  const n = pat === 0 || pat === 5 ? 1 : pat === 2 || pat === 4 ? 3 : 2;
+  if (pat !== 5) {
+    color(s, n > 1 ? 'Colore 1' : 'Colore', bind(o, 'color'), onObj(o));
+    if (n > 1) color(s, 'Colore 2', bind(o, 'color2'), onObj(o));
+    if (n > 2) color(s, 'Colore 3', bind(o, 'color3'), onObj(o));
+  } else {
+    const opts = Object.fromEntries(S.images.map(im => [im.id, im.name]));
+    if (S.images.length) select2(s, 'Immagine', bind(o, 'image'), opts, onObj(o));
+    const r = el('div', 'row');
+    button(r, 'Carica un’immagine…', () => pickImage(id => { o.image = id; onObj(o)(); renderTab(); }));
+    s.appendChild(r);
+    s.appendChild(el('p', 'hint', `Fino a ${MAX_IMG} immagini per scena, ridotte a ${IMG_SIZE}×${IMG_SIZE}. Restano salvate nella scena.`));
+  }
+  if (pat === 1 || pat === 2 || pat === 3 || (ground && pat === 5)) slider(s, ground && pat === 5 ? 'Grandezza dell’immagine' : 'Grandezza del motivo', bind(o, 'pscale'), 0.05, 20000, 0.05, onObj(o), fmtLen, { log: true });
+  const kind = ground ? 0 : o.material;
+  if (kind === 0) {
+    slider(s, 'Lucentezza', bind(o, 'shine'), 0, 1, 0.01, onObj(o), v => v === 0 ? 'opaco' : pct(v));
+    slider(s, 'Specchio', bind(o, 'mirror'), 0, 1, 0.01, onObj(o), v => v === 0 ? 'no' : pct(v));
+  }
+  if (kind === 1 || kind === 2) slider(s, 'Ruvidità', bind(o, 'rough'), 0, 1, 0.01, onObj(o), pct);
+  if (kind === 3) slider(s, 'Intensità della luce', bind(o, 'emit'), 0.5, 80, 0.5, onObj(o), v => v.toFixed(1).replace('.', ','), { log: true });
+}
+
 const PROPS = {
   terrain(o) {
     const s = section('Forma');
@@ -1419,12 +1723,15 @@ const PROPS = {
     slider(s3, 'Roccia sui pendii', bind(o, 'rockSlope'), 0.05, 0.7, 0.01, onTerrainLook(o), v => pct(1 - v));
   },
   prim(o) {
-    const s = section('Aspetto');
-    select2(s, 'Forma', bind(o, 'shape'), SHAPES, () => { onObj(o)(); renderTab(); });
-    select2(s, 'Materiale', bind(o, 'material'), MATERIALS, () => { onObj(o)(); renderTab(); });
-    color(s, 'Colore', bind(o, 'color'), onObj(o));
-    if (o.material === 1 || o.material === 2) slider(s, 'Ruvidità', bind(o, 'rough'), 0, 1, 0.01, onObj(o), pct);
-    if (o.material === 3) slider(s, 'Intensità della luce', bind(o, 'emit'), 0.5, 80, 0.5, onObj(o), v => v.toFixed(1).replace('.', ','), { log: true });
+    const s = section('Forma');
+    select2(s, 'Forma', bind(o, 'shape'), SHAPES, v => { if (SHAPE_PARAM[v]) o.p1 = SHAPE_PARAM[v][1]; onObj(o)(); renderTab(); });
+    if (SHAPE_PARAM[o.shape]) slider(s, SHAPE_PARAM[o.shape][0], bind(o, 'p1'), 0, 1, 0.01, onObj(o), pct);
+    if (o.shape === 9) {
+      const r = el('div', 'row');
+      button(r, 'Altra disposizione delle sfere', () => { o.seed = 1 + Math.floor(Math.random() * 99999); onObj(o)(); });
+      s.appendChild(r);
+    }
+    materialEditor(o, false);
     const s2 = section('Dimensioni', 'Semiassi in metri (raggio per la sfera). Con R trascini le maniglie di scala.');
     const uni = { get: () => (o.sx + o.sy + o.sz) / 3, set: v => { const k = v / ((o.sx + o.sy + o.sz) / 3); o.sx *= k; o.sy *= k; o.sz *= k; } };
     slider(s2, 'Grandezza', uni, 0.1, 8000, 0.1, () => { onObj(o)(); syncPanelValues(); }, fmtLen, { log: true });
@@ -1444,7 +1751,7 @@ const PROPS = {
   ground(o) {
     const s = section('Suolo', 'Piano infinito sotto a tutto, come un deserto senza fine. Senza suolo, sotto l’orizzonte si vede il cielo.');
     slider(s, 'Quota', bind(o, 'y'), -2000, 4000, 1, onObj(o), fmtLen);
-    color(s, 'Colore', bind(o, 'color'), onObj(o));
+    materialEditor(o, true);
   },
   clouds(o) {
     const s = section('Nuvole', 'Strato infinito: con la freccia verde ne cambi la quota.');
@@ -1474,7 +1781,11 @@ function loadScene(ns) {
   for (const id of [...nodes.keys()]) removeNode(id);
   terrData.clear();
   S = ns;
+  if (!Array.isArray(S.images)) S.images = [];
+  imgCanvas.clear(); texCache.clear();
+  S.objects.forEach(upgradeObj);
   for (const o of S.objects) makeNode(o);
+  loadImages();
   camera3.fov = 2 * Math.atan(12 / S.camera.focal) / DEG;
   camera3.updateProjectionMatrix();
   if (!S.camera.snap) {
