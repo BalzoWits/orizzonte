@@ -12,14 +12,13 @@ class Renderer {
     this.canvas = canvas;
 
     this.progSky = this.program(VS_QUAD, FS_SKY);
-    // se lo shader completo non compila (alcuni driver), si riprova senza forme a distanza e modelli
-    this.lite = false;
-    try { this.progTrace = this.program(VS_QUAD, FS_TRACE); }
-    catch (e) {
-      console.warn('Shader completo non compilato, uso la versione ridotta', e.message);
-      this.progTrace = this.program(VS_QUAD, FS_TRACE.replace('#define MAX_TER', '#define LITE\n#define MAX_TER'));
-      this.lite = true;
-    }
+    // Lo shader del render si compila solo quando serve, con dentro solo le parti che la scena usa
+    // (vedi prepareTrace): su Direct3D lo shader completo richiede minuti di compilazione.
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    this.gpu = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+    this.parallel = gl.getExtension('KHR_parallel_shader_compile');
+    this.traceVariants = new Map();
+    this.progTrace = null;
     this.progShow = this.program(VS_QUAD, FS_SHOW);
 
     const vao = gl.createVertexArray();
@@ -81,8 +80,49 @@ class Renderer {
     gl.attachShader(p, mk(gl.FRAGMENT_SHADER, fs));
     gl.bindAttribLocation(p, 0, 'aPos');
     gl.linkProgram(p);
-    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('Errore di link:\n' + gl.getProgramInfoLog(p));
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      const lost = gl.isContextLost() ? ' (contesto grafico perso: probabilmente il driver ha impiegato troppo a compilare)' : '';
+      throw new Error('errore di link' + lost + ': ' + (gl.getProgramInfoLog(p) || 'nessun dettaglio dal driver'));
+    }
     return p;
+  }
+
+  // avvia compilazione e link senza aspettare il risultato
+  startProgram(vs, fs) {
+    const gl = this.gl;
+    const mk = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; };
+    const p = gl.createProgram();
+    const v = mk(gl.VERTEX_SHADER, vs), f = mk(gl.FRAGMENT_SHADER, fs);
+    gl.attachShader(p, v); gl.attachShader(p, f);
+    gl.bindAttribLocation(p, 0, 'aPos');
+    gl.linkProgram(p);
+    p._fs = f;
+    return p;
+  }
+  // defs: righe '#define ...' con le parti da escludere. Restituisce 'ready', 'compiling' o 'error'.
+  prepareTrace(defs) {
+    const gl = this.gl;
+    const key = defs.join('|');
+    let v = this.traceVariants.get(key);
+    if (!v) {
+      const fs = FS_TRACE.replace('#define MAX_TER', defs.join('\n') + '\n#define MAX_TER');
+      v = { p: this.startProgram(VS_QUAD, fs), state: 'compiling', t0: performance.now() };
+      this.traceVariants.set(key, v);
+    }
+    if (v.state === 'compiling') {
+      if (this.parallel && !gl.getProgramParameter(v.p, this.parallel.COMPLETION_STATUS_KHR)) return 'compiling';
+      if (gl.getProgramParameter(v.p, gl.LINK_STATUS)) {
+        v.state = 'ready';
+        console.log('render pronto in', Math.round(performance.now() - v.t0), 'ms', defs.join(' ') || '(tutto)');
+      } else {
+        v.state = 'error';
+        v.err = (gl.getShaderInfoLog(v.p._fs) || '') + (gl.getProgramInfoLog(v.p) || '') || (gl.isContextLost() ? 'contesto grafico perso' : 'nessun dettaglio dal driver');
+        console.error('Shader del render non compilato', defs, v.err);
+      }
+    }
+    if (v.state === 'ready') this.progTrace = v.p;
+    this.traceError = v.err;
+    return v.state;
   }
 
   texture2D(ifmt, w, h, fmt, type, data, filter, wrapS, wrapT) {
@@ -253,6 +293,7 @@ class Renderer {
     gl.uniform1f(u('uAperture'), sc.cam.aperture);
     gl.uniform1f(u('uFocus'), sc.cam.focus);
     gl.uniform1i(u('uStyle'), sc.style);
+    gl.uniform1i(u('uZero'), 0);
     gl.uniform1i(u('uTerCount'), sc.terCount);
     gl.uniform4fv(u('uTerPos'), sc.terPos);
     gl.uniform4fv(u('uTerSize'), sc.terSize);

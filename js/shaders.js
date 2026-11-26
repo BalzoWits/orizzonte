@@ -108,6 +108,25 @@ precision highp sampler2DArray;
 #define MAX_TER ${MAX_TER}
 #define MAX_OBJ ${MAX_OBJ}
 #define PI_C 3.14159265
+#ifndef TER_N
+#define TER_N uTerCount
+#endif
+#ifndef OBJ_N
+#define OBJ_N uObjCount
+#endif
+#ifndef STYLE
+#define STYLE STYLE
+#endif
+#ifdef NO_WATER
+#define WATER_ON false
+#else
+#define WATER_ON (uWaterOn == 1)
+#endif
+#ifdef NO_GROUND
+#define GROUND_ON false
+#else
+#define GROUND_ON (uGroundOn == 1)
+#endif
 
 uniform vec2 uRes;
 uniform int uFrame;
@@ -153,6 +172,7 @@ uniform int uCloudSteps, uBounces, uTerrainSteps;
 // 9 parametro forma, - | 10-15 sfere del blob (centro, raggio)
 uniform int uObjCount;
 uniform int uUsePrev;
+uniform int uZero;   // vale 0: rende i limiti dei cicli non costanti (Direct3D non li srotola)
 uniform sampler2D uPrev;
 
 out vec4 outColor;
@@ -239,6 +259,9 @@ float terBot(int i, vec2 q, float h){
 }
 // distanza (approssimata) dalla superficie: > 0 fuori, < 0 dentro la roccia
 float terF(int i, vec3 p){
+#ifdef NO_FLOAT
+  return p.y - terH(i, p.xz);
+#endif
   float h = terH(i, p.xz);
   if (uTerFloat[i] <= 0.0) return p.y - h;
   return max(p.y - h, terBot(i, p.xz, h) - p.y);
@@ -247,7 +270,7 @@ float terF(int i, vec3 p){
 vec3 terNormalAny(int i, vec2 q, float t, bool bottom){
   float e = max(0.5, t*0.0012);
   float v[4];
-  for (int k = 0; k < 4; k++){
+  for (int k = 0; k < 4 + uZero; k++){
     vec2 o = k == 0 ? vec2(e, 0.0) : k == 1 ? vec2(-e, 0.0) : k == 2 ? vec2(0.0, e) : vec2(0.0, -e);
     float h = terH(i, q + o);
     v[k] = bottom ? terBot(i, q + o, h) : h;
@@ -271,7 +294,7 @@ bool traceTer(int i, vec3 ro, vec3 rd, float tmax, int steps, float k, out float
   float t = ta, tp = ta, a = 0.0, b = 0.0;
   bool refine = false;
   int ri = 0, ms = 0;
-  for (int s = 0; s < 720; s++){
+  for (int s = 0; s < 720 + uZero; s++){
     float tt = refine ? 0.5*(a + b) : t;
     float d = terF(i, lo + ld*tt);
     if (refine){
@@ -331,7 +354,7 @@ float sdfObj(int i, int shape, vec3 q){
   if (shape == 9){
     float k = p1*0.6 + 0.05;
     float d = 1e5;
-    for (int b = 0; b < 6; b++){
+    for (int b = 0; b < 6 + uZero; b++){
       vec4 s = OT(i, 10 + b);
       if (s.w <= 0.0) break;
       d = smin(d, length(q - s.xyz) - s.w, k);
@@ -360,7 +383,7 @@ bool traceMesh(int root, vec3 lo, vec3 ld, float eps, out float tOut, out vec3 n
   int sp = 0;
   stack[sp++] = root;
   float best = INF; vec3 bn = vec3(0, 1, 0);
-  for (int it = 0; it < 2048; it++){
+  for (int it = 0; it < 2048 + uZero; it++){
     if (sp == 0) break;
     int ni = stack[--sp];
     vec4 a = MNf(ni*2), b = MNf(ni*2 + 1);
@@ -370,8 +393,7 @@ bool traceMesh(int root, vec3 lo, vec3 ld, float eps, out float tOut, out vec3 n
     if (tn > tf || tf < eps || tn > best) continue;
     if (b.w > 0.5){
       int start = int(a.w + 0.5), cnt = int(b.w + 0.5);
-      for (int k = 0; k < 4; k++){
-        if (k >= cnt) break;
+      for (int k = 0; k < cnt; k++){
         int tb = (start + k) * 6;
         vec3 v0 = MTf(tb).xyz, v1 = MTf(tb + 1).xyz, v2 = MTf(tb + 2).xyz;
         vec3 e1 = v1 - v0, e2 = v2 - v0;
@@ -455,14 +477,13 @@ bool hitObject(int i, vec3 ro, vec3 rd, out float tOut, out vec3 nOut, out vec3 
       }
     }
     if (t >= INF) return false;
-#ifdef LITE
-  } else {
-    return false;
-#else
+#ifndef NO_MESH
   } else if (shape == 11){
     int root = int(OT(i, 9).y + 0.5);
     if (OT(i, 9).y < 0.0 || !traceMesh(root, lo, ld, eps, t, nl)) return false;
-  } else {
+#endif
+#ifndef NO_SDF
+  } else if (shape >= 3 && shape <= 10){
     // forme a distanza: si cammina dentro il cubo unitario che le contiene
     vec3 inv = 1.0 / ld;
     vec3 t0 = (-vec3(1.002) - lo)*inv, t1 = (vec3(1.002) - lo)*inv;
@@ -471,20 +492,27 @@ bool hitObject(int i, vec3 ro, vec3 rd, out float tOut, out vec3 nOut, out vec3 
     if (tn > tf || tf < eps) return false;
     float il = 1.0 / length(ld);
     float tt = max(tn, eps);
+    // marcia e poi 4 campioni per la normale nello stesso ciclo: sdfObj compare una volta sola
     float sg = 1.0;
     bool hit = false;
-    for (int k = 0; k < 160; k++){
-      float d0 = sdfObj(i, shape, lo + ld*tt);
+    int nk = 0;
+    vec3 nacc = vec3(0), qh = vec3(0);
+    for (int k = 0; k < 168 + uZero; k++){
+      vec3 e = vec3(((nk + 3) >> 1) & 1, (nk >> 1) & 1, nk & 1) * 2.0 - 1.0;
+      float d0 = sdfObj(i, shape, hit ? qh + e*0.0008 : lo + ld*tt);
+      if (hit){ nacc += e * d0; nk++; if (nk >= 4) break; continue; }
       if (k == 0) sg = d0 < 0.0 ? -1.0 : 1.0;
       float d = sg * d0;
-      if (d < 0.0004){ hit = true; break; }
+      if (d < 0.0004){ hit = true; qh = lo + ld*tt; continue; }
       tt += d * il;
       if (tt > tf) break;
     }
     if (!hit) return false;
     t = tt;
-    nl = sdfNormal(i, shape, lo + ld*t);
+    nl = dot(nacc, nacc) > 0.0 ? normalize(nacc) : normalize(qh);
 #endif
+  } else {
+    return false;
   }
   tOut = t;
   lp = (lo + ld*t) * s;
@@ -496,23 +524,21 @@ bool hitObject(int i, vec3 ro, vec3 rd, out float tOut, out vec3 nOut, out vec3 
 // id: 0 cielo, 1 terreno, 2 suolo, 3 acqua, 10+i oggetti
 struct Hit { float t; vec3 n; int id; int sub; vec3 lp; };
 
-Hit traceScene(vec3 ro, vec3 rd, int steps){
+Hit traceScene(vec3 ro, vec3 rd, int steps, float k, bool shadowRay){
   Hit h; h.t = INF; h.id = 0; h.sub = 0; h.n = vec3(0,1,0); h.lp = vec3(0);
   float t;
-  for (int i = 0; i < MAX_TER; i++){
-    if (i >= uTerCount) break;
-    if (traceTer(i, ro, rd, h.t, steps, 0.45, t) && t < h.t){ h.t = t; h.id = 1; h.sub = i; }
+  for (int i = 0; i < TER_N; i++){
+    if (traceTer(i, ro, rd, h.t, steps, k, t) && t < h.t){ h.t = t; h.id = 1; h.sub = i; }
   }
-  if (uGroundOn == 1 && rd.y < 0.0 && ro.y > uGroundY){
+  if (GROUND_ON && rd.y < 0.0 && ro.y > uGroundY){
     t = (uGroundY - ro.y) / rd.y;
     if (t < h.t - 0.01){ h.t = t; h.id = 2; h.n = vec3(0,1,0); }
   }
-  if (uWaterOn == 1){
+  if (WATER_ON && !shadowRay){
     t = (uWaterLevel - ro.y) / rd.y;
     if (t > 0.0 && t < h.t){ h.t = t; h.id = 3; h.n = vec3(0, ro.y > uWaterLevel ? 1.0 : -1.0, 0); }
   }
-  for (int i = 0; i < MAX_OBJ; i++){
-    if (i >= uObjCount) break;
+  for (int i = 0; i < OBJ_N; i++){
     vec3 n, lp;
     if (hitObject(i, ro, rd, t, n, lp) && t < h.t){ h.t = t; h.n = n; h.id = 10 + i; h.lp = lp; }
   }
@@ -541,6 +567,9 @@ float cloudDens(vec3 p, bool detail){
 float cloudSigma(){ return uCloudDensity * 0.03; }
 
 float cloudShadow(vec3 p){
+#ifdef NO_CLOUDS
+  return 1.0;
+#endif
   if (uCloudCover <= 0.001 || uSunDir.y <= 0.02) return 1.0;
   float mid = mix(uCloudBottom, uCloudTop, 0.45);
   if (p.y > mid) return 1.0;
@@ -550,6 +579,9 @@ float cloudShadow(vec3 p){
 }
 
 vec4 clouds(vec3 ro, vec3 rd, float tMax){
+#ifdef NO_CLOUDS
+  return vec4(0,0,0,1);
+#endif
   if (uCloudCover <= 0.001 || abs(rd.y) < 1e-5) return vec4(0,0,0,1);
   float ta = (uCloudBottom - ro.y) / rd.y, tb = (uCloudTop - ro.y) / rd.y;
   if (ta > tb){ float s = ta; ta = tb; tb = s; }
@@ -565,19 +597,18 @@ vec4 clouds(vec3 ro, vec3 rd, float tMax){
   vec3 ambBot = skyTex(normalize(vec3(rd.x, 0.05, rd.z))) * 0.5;
   vec3 acc = vec3(0); float Tr = 1.0;
   float th = uCloudTop - uCloudBottom;
-  for (int i = 0; i < 128; i++){
-    if (i >= N) break;
+  for (int i = 0; i < N; i++){
     vec3 p = ro + rd*t;
     float d = cloudDens(p, true);
     if (d > 0.002){
       float s = d * sig;
       float od = 0.0, ls = th*0.04;
       vec3 lp = p;
-      for (int j = 0; j < 6; j++){ lp += uSunDir*ls; od += cloudDens(lp, j < 2) * sig * ls; ls *= 1.7; }
+      for (int j = 0; j < 6 + uZero; j++){ lp += uSunDir*ls; od += cloudDens(lp, j < 2) * sig * ls; ls *= 1.7; }
       float hN = clamp((p.y - uCloudBottom) / th, 0.0, 1.0);
       float powder = 1.0 - exp(-d*4.0);
       vec3 sunL = uSunColor * (exp(-od)*0.75 + exp(-od*0.22)*0.25) * ph * mix(0.6, 1.0, powder) * PI;
-      if (uStyle == 2) sunL = uSunColor * (od < 1.5 ? 0.35 : 0.08);
+      if (STYLE == 2) sunL = uSunColor * (od < 1.5 ? 0.35 : 0.08);
       vec3 amb = mix(ambBot, ambTop, hN);
       vec3 S = (sunL + amb) * s;
       float Ts = exp(-s*dt);
@@ -655,7 +686,10 @@ vec3 pattern(int pat, vec3 p, float sc, vec3 c1, vec3 c2, vec3 c3, float yu, vec
   return c1;
 }
 
-Surf groundSurf(vec3 p){
+// ingressi del motivo: il colore col motivo si calcola una volta sola in radiance (meno codice da compilare)
+struct PatIn { int pat; vec3 p; float sc; vec3 c1, c2, c3; float yu; vec2 uv; float img; float emitK; };
+
+Surf groundSurf(vec3 p, inout PatIn pin){
   Surf s; s.type = 0; s.rough = 1.0; s.emit = vec3(0); s.n = vec3(0,1,0);
   s.mirror = uGroundPat.w; s.shine = uGroundShine;
   int pat = int(uGroundPat.x + 0.5);
@@ -664,13 +698,14 @@ Surf groundSurf(vec3 p){
     // immagine: lato = sc metri, centrata nell'origine; se non si ripete, fuori resta il colore 1
     vec2 uv = vec2(p.x, -p.z) / sc + 0.5;
     if (pat == 5 && uGroundImgRepeat == 0 && (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0)) pat = 0;
-    s.albedo = pat == 0 ? uGroundColor : pattern(pat, vec3(p.x, sc*0.5, p.z), sc, uGroundColor, uGroundColor2, uGroundColor3, 0.0, uv, uGroundPat.z);
-    s.albedo = clamp(s.albedo, 0.0, 0.95);
+    s.albedo = uGroundColor;
+    pin.pat = pat; pin.p = vec3(p.x, sc*0.5, p.z); pin.sc = sc; pin.c1 = uGroundColor; pin.c2 = uGroundColor2; pin.c3 = uGroundColor3;
+    pin.yu = 0.0; pin.uv = uv; pin.img = uGroundPat.z; pin.emitK = 0.0;
     return s;
   }
   float n1 = textureLod(uNoise, p*0.00055, 0.0).r, n2 = textureLod(uNoise, p*0.0031, 0.0).g, n3 = textureLod(uNoise, p*0.019, 0.0).r;
   s.albedo = clamp(uGroundColor * (0.7 + 0.35*n1 + 0.25*n2) * (0.9 + 0.2*n3), 0.0, 0.95);
-  if (uStyle != 2 && s.mirror < 0.01){
+  if (STYLE != 2 && s.mirror < 0.01){
     vec4 nn = textureLod(uNoise, p*0.021, 0.0);
     s.n = normalize(vec3(0,1,0) + vec3(nn.r - 0.5, 0.0, nn.b - 0.45)*0.25);
   }
@@ -682,7 +717,11 @@ Surf terrainSurf(int i, vec3 p, float dist){
   vec4 P = uTerPos[i], S = uTerSize[i];
   vec3 q = rotY(p - P.xyz, -P.w);
   float flow = textureLod(uFlows, vec3(q.xz / S.xz + 0.5, S.w), 0.0).r;
+  #ifdef NO_FLOAT
+  bool bottom = false;
+#else
   bool bottom = uTerFloat[i] > 0.0 && q.y < -0.5;
+#endif
   vec3 n = rotY(terNormalAny(i, q.xz, dist, bottom), P.w);
   if (bottom){
     // parte sotto di un'isola sospesa: roccia nuda
@@ -707,13 +746,13 @@ Surf terrainSurf(int i, vec3 p, float dist){
   vec3 rock = uTerRock[i] * (0.65 + 0.55*n3) * (0.8 + 0.4*n1);
   rock *= 0.9 + 0.1*sin(p.y*0.035 + n1*9.0 + n4*5.0);
   col = mix(col, rock, rockAmt);
-  if (uWaterOn == 1){
+  if (WATER_ON){
     float sb = 1.0 - smoothstep(uWaterLevel + 2.0, uWaterLevel + 12.0 + n2*25.0, p.y);
     col = mix(col, uTerSand[i]*(0.85 + 0.3*n3), sb*(1.0 - rockAmt*0.6));
   }
   float snow = smoothstep(uTerMat[i].x - 0.025, uTerMat[i].x + 0.025, hN + (n1 - 0.5)*0.12 - slope*0.45 + flow*0.05);
   col = mix(col, uTerSnow[i] * (0.92 + 0.08*n3), snow);
-  if (uStyle != 2){
+  if (STYLE != 2){
     vec4 nn = textureLod(uNoise, p*0.021, 0.0);
     float bump = mix(0.25, 0.75, rockAmt) * (1.0 - snow*0.6);
     n = normalize(n + (nn.rgb - vec3(0.5, 0.5, 0.45))*vec3(1.0, 0.0, 1.0)*bump);
@@ -723,7 +762,7 @@ Surf terrainSurf(int i, vec3 p, float dist){
   return s;
 }
 
-Surf objectSurf(int i, vec3 n, vec3 lp){
+Surf objectSurf(int i, vec3 n, vec3 lp, inout PatIn pin){
   vec4 c1 = OT(i, 5), c2 = OT(i, 6), c3 = OT(i, 7), pm = OT(i, 8), sc = OT(i, 1);
   int shape = int(OT(i, 0).w + 0.5);
   Surf s; s.n = n; s.rough = c1.w; s.emit = vec3(0); s.mirror = c2.w; s.shine = c3.w;
@@ -740,29 +779,13 @@ Surf objectSurf(int i, vec3 n, vec3 lp){
       uv = uv*0.5 + 0.5;
     }
   }
-  s.albedo = pattern(pat, lp, max(pm.y, 1e-3), c1.rgb, c2.rgb, c3.rgb, clamp(lu.y, -1.0, 1.0), uv, pm.z);
+  s.albedo = c1.rgb;
+  pin.pat = pat; pin.p = lp; pin.sc = max(pm.y, 1e-3); pin.c1 = c1.rgb; pin.c2 = c2.rgb; pin.c3 = c3.rgb;
+  pin.yu = clamp(lu.y, -1.0, 1.0); pin.uv = uv; pin.img = pm.z; pin.emitK = pm.w;
   int m = int(sc.w + 0.5);
   s.type = m;
   if (m == 3) s.emit = s.albedo * pm.w;
   return s;
-}
-
-bool shadowed(vec3 p, vec3 L, out vec3 tint){
-  tint = vec3(1);
-  float t;
-  for (int i = 0; i < MAX_TER; i++){
-    if (i >= uTerCount) break;
-    if (traceTer(i, p, L, INF, uTerrainSteps/3 + 40, 0.6, t)) return true;
-  }
-  for (int i = 0; i < MAX_OBJ; i++){
-    if (i >= uObjCount) break;
-    vec3 n, lp;
-    if (hitObject(i, p, L, t, n, lp)){
-      int m = int(OT(i, 1).w + 0.5);
-      if (m == 2) tint *= OT(i, 5).rgb*0.85; else if (m != 3) return true;
-    }
-  }
-  return false;
 }
 
 // luce ambiente fissa per gli stili non fotografici
@@ -770,15 +793,53 @@ vec3 flatAmbient(vec3 n){
   return mix(skyTex(normalize(vec3(n.x, 0.15, n.z))), skyTex(vec3(0,1,0)), clamp(n.y, 0.0, 1.0)) * uSkyLight * 0.9;
 }
 
-vec3 radiance(vec3 ro, vec3 rd){
+// Un solo ciclo lancia TUTTI i raggi (sonde per i contorni, percorso, ombre): traceScene compare una volta
+// sola nel codice. Il compilatore Direct3D copia ogni chiamata in linea, e con piu' chiamate
+// lo shader impiegava minuti a compilare.
+vec3 radiance(vec3 ro, vec3 rd, vec3 probe1, vec3 probe2, out bool edge){
   vec3 L = vec3(0), T = vec3(1);
   bool spec = true;
-  bool inWater = uWaterOn == 1 && ro.y < uWaterLevel;
+  bool inWater = WATER_ON && ro.y < uWaterLevel;
   int glassObj = -1;
-  for (int b = 0; b < 8; b++){
-    if (b > uBounces) break;
-    int steps = b == 0 ? uTerrainSteps : uTerrainSteps/2 + 30;
-    Hit h = traceScene(ro, rd, steps);
+  bool shadowPending = false, stopAfterShadow = false;
+  vec3 sro = vec3(0), srd = vec3(0), sAdd = vec3(0);
+  int probes = STYLE == 2 ? 2 : 0;
+  float pd0 = 0.0, pd1 = 0.0, pd2 = 0.0;
+  int pid0 = 0, pid1 = 0, pid2 = 0;
+  edge = false;
+  int b = 0;
+  for (int it = 0; it < 24 + uZero; it++){
+    // 1 = sonda per i contorni, 2 = raggio d'ombra, 0 = raggio del percorso
+    int kind = it < probes ? 1 : (shadowPending ? 2 : 0);
+    if (kind == 0 && b > uBounces) break;
+    vec3 o = kind == 1 ? uCamPos : (kind == 2 ? sro : ro);
+    vec3 d = kind == 1 ? (it == 0 ? probe1 : probe2) : (kind == 2 ? srd : rd);
+    int steps = kind == 2 ? uTerrainSteps/3 + 40 : (b == 0 ? uTerrainSteps : uTerrainSteps/2 + 30);
+    Hit h = traceScene(o, d, steps, kind == 2 ? 0.6 : 0.45, kind == 2);
+
+    if (kind == 1){
+      float dd = h.id == 0 ? 1e7 : h.t;
+      int ii = h.id == 1 ? 1 + h.sub : h.id;
+      if (it == 0){ pd1 = dd; pid1 = ii; } else { pd2 = dd; pid2 = ii; }
+      continue;
+    }
+    if (kind == 2){
+      shadowPending = false;
+      bool lit = h.id == 0;
+      vec3 tint = vec3(1);
+      if (h.id >= 10){
+        int m = int(OT(h.id - 10, 1).w + 0.5);
+        if (m == 2){ lit = true; tint = OT(h.id - 10, 5).rgb*0.85; }
+        else if (m == 3) lit = true;
+      }
+      if (lit) L += sAdd * tint;
+      if (stopAfterShadow) break;
+      continue;
+    }
+
+    int bb = b;
+    b++;
+    if (bb == 0){ pd0 = h.id == 0 ? 1e7 : h.t; pid0 = h.id == 1 ? 1 + h.sub : h.id; }
     float tSeg = h.id == 0 ? INF : h.t;
     if (inWater){
       vec3 sg = waterSigma();
@@ -788,15 +849,15 @@ vec3 radiance(vec3 ro, vec3 rd){
       T *= tr;
     } else if (glassObj < 0){
       applyFog(ro, rd, tSeg, L, T);
-      if (b == 0 || spec){
+      if (bb == 0 || spec){
         vec4 cl = clouds(ro, rd, tSeg);
         L += T * cl.rgb; T *= cl.a;
       }
     }
     if (h.id == 0){
       vec3 sky = skyRadiance(rd, spec);
-      if (b > 0 && !spec) sky *= uSkyLight;
-      if (b > 0) sky = min(sky, vec3(40.0));
+      if (bb > 0 && !spec) sky *= uSkyLight;
+      if (bb > 0) sky = min(sky, vec3(40.0));
       L += T * sky;
       break;
     }
@@ -804,7 +865,7 @@ vec3 radiance(vec3 ro, vec3 rd){
     float eps = max(0.02, h.t*0.0004);
 
     if (h.id == 3){
-      vec3 n = uStyle == 2 ? vec3(0,1,0) : waterNormal(p, h.t);
+      vec3 n = STYLE == 2 ? vec3(0,1,0) : waterNormal(p, h.t);
       bool fromAbove = rd.y < 0.0;
       if (!fromAbove) n = -n;
       float eta = fromAbove ? 1.0/1.333 : 1.333;
@@ -830,9 +891,15 @@ vec3 radiance(vec3 ro, vec3 rd){
     }
 
     Surf s;
-    if (h.id >= 10) s = objectSurf(h.id - 10, h.n, h.lp);
-    else if (h.id == 2) s = groundSurf(p);
+    PatIn pin; pin.pat = 0;
+    if (h.id >= 10) s = objectSurf(h.id - 10, h.n, h.lp, pin);
+    else if (h.id == 2) s = groundSurf(p, pin);
     else s = terrainSurf(h.sub, p, h.t);
+    if (pin.pat > 0){
+      s.albedo = pattern(pin.pat, pin.p, pin.sc, pin.c1, pin.c2, pin.c3, pin.yu, pin.uv, pin.img);
+      if (h.id == 2) s.albedo = clamp(s.albedo, 0.0, 0.95);
+      if (s.type == 3) s.emit = s.albedo * pin.emitK;
+    }
 
     if (s.type == 3){ L += T * s.emit; break; }
 
@@ -860,12 +927,12 @@ vec3 radiance(vec3 ro, vec3 rd){
 
     if (s.type == 1){
       vec3 r = reflect(rd, n);
-      vec3 d = normalize(r + randSphere()*s.rough*s.rough);
-      if (dot(d, n) <= 0.0) d = r;
+      vec3 d2 = normalize(r + randSphere()*s.rough*s.rough);
+      if (dot(d2, n) <= 0.0) d2 = r;
       float c = clamp(dot(-rd, n), 0.0, 1.0);
       vec3 F = s.albedo + (1.0 - s.albedo)*pow(1.0 - c, 5.0);
       T *= F;
-      rd = d; ro = p + n*eps;
+      rd = d2; ro = p + n*eps;
       spec = s.rough < 0.35;
       continue;
     }
@@ -878,80 +945,71 @@ vec3 radiance(vec3 ro, vec3 rd){
       continue;
     }
 
-    // diffuso
+    // diffuso: la luce del sole si aggiunge solo se il raggio d'ombra (prossimo giro) arriva al cielo
     vec3 sp = p + n*eps;
-    // riflesso brillante del sole (Blinn-Phong): il puntino di luce delle sfere anni '90
     float shExp = 12.0 + s.shine*s.shine*500.0;
-    if (uStyle == 0){
-      // fotorealistico: sole con ombre morbide + luce indiretta
+    float shNorm = s.shine * 0.2 * (shExp + 8.0) / (8.0*PI);
+    if (STYLE == 0){
       vec3 ld = coneDir(uSunDir, cos(uSunSize));
       float ndl = dot(n, ld);
       if (ndl > 0.0 && uSunColor.r + uSunColor.g + uSunColor.b > 0.0){
-        vec3 tint;
-        if (!shadowed(sp, ld, tint)){
-          vec3 E = uSunColor * tint * cloudShadow(p);
-          if (inWater) E *= exp(-waterSigma() * max(uWaterLevel - p.y, 0.0) / max(ld.y, 0.1));
-          if (uFogDensity > 0.0) E *= exp(-fogOD(sp, ld, 30000.0));
-          L += T * s.albedo / PI * E * ndl;
-          if (s.shine > 0.0) L += T * E * s.shine * 0.2 * (shExp + 8.0) / (8.0*PI) * pow(max(dot(n, normalize(ld - rd)), 0.0), shExp) * ndl;
-        }
+        vec3 E = uSunColor * cloudShadow(p);
+        if (inWater) E *= exp(-waterSigma() * max(uWaterLevel - p.y, 0.0) / max(ld.y, 0.1));
+        if (uFogDensity > 0.0) E *= exp(-fogOD(sp, ld, 30000.0));
+        sAdd = T * E * ndl * (s.albedo / PI + shNorm * pow(max(dot(n, normalize(ld - rd)), 0.0), shExp));
+        sro = sp; srd = ld; shadowPending = true;
       }
       T *= s.albedo;
       rd = cosineDir(n);
       ro = sp;
       spec = false;
-      if (b >= 2){
+      if (bb >= 2){
         float q = clamp(max(T.r, max(T.g, T.b)), 0.05, 0.95);
-        if (rnd() > q) break;
-        T /= q;
+        if (rnd() > q){ if (shadowPending) stopAfterShadow = true; else break; }
+        else T /= q;
       }
     } else {
       // classico / illustrato: ombre nette, luce ambiente costante, nessun rimbalzo diffuso
       float ndl = dot(n, uSunDir);
-      float lit = 0.0;
-      vec3 tint = vec3(1);
-      if (ndl > 0.0 && !shadowed(sp, uSunDir, tint)) lit = ndl * cloudShadow(p);
       vec3 amb = flatAmbient(n);
-      if (uStyle == 2){
-        // bande di colore piatte
+      float lit = ndl > 0.0 ? ndl * cloudShadow(p) : 0.0;
+      if (STYLE == 2){
         lit = lit > 0.55 ? 1.0 : lit > 0.18 ? 0.62 : lit > 0.0 ? 0.3 : 0.0;
         float lum = dot(s.albedo, vec3(0.299, 0.587, 0.114));
         s.albedo = clamp(mix(vec3(lum), s.albedo, 1.45), 0.0, 1.0);
         amb = vec3(dot(amb, vec3(0.333))) * mix(vec3(0.75, 0.8, 1.0), vec3(1.0), 0.4);
-      }
-      if (uStyle == 1){
+      } else {
         float lum = dot(s.albedo, vec3(0.299, 0.587, 0.114));
         s.albedo = clamp(mix(vec3(lum), s.albedo, 1.2), 0.0, 1.0);
       }
-      vec3 E = uSunColor * tint * lit;
+      L += T * s.albedo * amb * 0.55;
+      if (lit <= 0.0) break;
+      vec3 E = uSunColor * lit;
       if (inWater) E *= exp(-waterSigma() * max(uWaterLevel - p.y, 0.0) / max(uSunDir.y, 0.1));
-      L += T * s.albedo * (E / PI + amb * 0.55);
-      if (s.shine > 0.0 && lit > 0.0){
-        float hl = pow(max(dot(n, normalize(uSunDir - rd)), 0.0), shExp);
-        if (uStyle == 2) hl = step(0.5, hl);
-        L += T * uSunColor * tint * s.shine * 0.2 * (shExp + 8.0) / (8.0*PI) * hl * (uStyle == 2 ? 0.05 : 1.0);
-      }
-      break;
+      float hl = pow(max(dot(n, normalize(uSunDir - rd)), 0.0), shExp);
+      if (STYLE == 2) hl = step(0.5, hl) * 0.05;
+      sAdd = T * (s.albedo * E / PI + uSunColor * shNorm * hl);
+      sro = sp; srd = uSunDir; shadowPending = true; stopAfterShadow = true;
     }
+  }
+  if (probes > 0){
+    float rel = max(abs(pd1 - pd0), abs(pd2 - pd0)) / max(pd0, 1.0);
+    edge = pid0 != pid1 || pid0 != pid2 || rel > 0.06;
   }
   return L;
 }
 
-// profondita' del raggio primario per i contorni dello stile illustrato
-float primaryDepth(vec2 fc, out int id){
+vec3 camDir(vec2 fc){
   vec2 sxy = (fc / uRes) * 2.0 - 1.0;
-  vec3 dir = normalize(uCamFwd + uCamRight*sxy.x*uTanHalf*uAspect + uCamUp*sxy.y*uTanHalf);
-  Hit h = traceScene(uCamPos, dir, uTerrainSteps);
-  id = h.id == 1 ? 1 + h.sub : h.id;
-  return h.id == 0 ? 1e7 : h.t;
+  return normalize(uCamFwd + uCamRight*sxy.x*uTanHalf*uAspect + uCamUp*sxy.y*uTanHalf);
 }
 
 void main(){
   uvec2 pix = uvec2(gl_FragCoord.xy);
   rngState = pcg(pix.x + pcg(pix.y + pcg(uint(uFrame) * 7919u + 17u)));
   vec2 jit = vec2(rnd(), rnd());
-  vec2 sxy = ((gl_FragCoord.xy - 0.5 + jit) / uRes) * 2.0 - 1.0;
-  vec3 dir = normalize(uCamFwd + uCamRight*sxy.x*uTanHalf*uAspect + uCamUp*sxy.y*uTanHalf);
+  vec2 fc = gl_FragCoord.xy - 0.5 + jit;
+  vec3 dir = camDir(fc);
   vec3 ro = uCamPos;
   if (uAperture > 0.0){
     vec3 fp = ro + dir * (uFocus / dot(dir, uCamFwd));
@@ -959,20 +1017,10 @@ void main(){
     ro += uCamRight*cos(a)*r + uCamUp*sin(a)*r;
     dir = normalize(fp - ro);
   }
-  vec3 c = radiance(ro, dir);
-  if (uStyle == 2){
-    // contorni a inchiostro dove cambia oggetto o la distanza salta
-    // un solo traceScene in un ciclo (tre raggi): meno codice da compilare
-    vec2 fc = gl_FragCoord.xy - 0.5 + jit;
-    int ids[3]; float ds[3];
-    for (int k = 0; k < 3; k++){
-      int id;
-      ds[k] = primaryDepth(fc + (k == 1 ? vec2(1.2, 0.0) : k == 2 ? vec2(0.0, 1.2) : vec2(0.0)), id);
-      ids[k] = id;
-    }
-    float rel = max(abs(ds[1] - ds[0]), abs(ds[2] - ds[0])) / max(ds[0], 1.0);
-    if (ids[0] != ids[1] || ids[0] != ids[2] || rel > 0.06) c *= 0.12;
-  }
+  bool edge;
+  vec3 c = radiance(ro, dir, camDir(fc + vec2(1.2, 0.0)), camDir(fc + vec2(0.0, 1.2)), edge);
+  // contorni a inchiostro (stile illustrato) dove cambia oggetto o la distanza salta
+  if (edge) c *= 0.12;
   if (!(c.r == c.r && c.g == c.g && c.b == c.b)) c = vec3(0);
   c = min(c, vec3(60.0));
   vec4 o = vec4(c, 1.0);

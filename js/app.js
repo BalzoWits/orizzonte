@@ -2,7 +2,7 @@
 import * as THREE from '../lib/three.module.js';
 import { OrbitControls } from '../lib/OrbitControls.js';
 import { TransformControls } from '../lib/TransformControls.js';
-import { readModelFile, normalizeTris, simplifyTris, computeNormals, buildBVH, saveMesh, loadMesh, deleteMesh, f32ToB64, b64ToF32 } from './models.js';
+import { readModelFile, normalizeTris, simplifyTris, computeNormals, buildBVH, saveMesh, loadMesh, deleteMesh, f32ToB64, b64ToF32 } from './models.js?v=9';
 
 const $ = s => document.querySelector(s);
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -1015,6 +1015,35 @@ function cameraFor(final) {
   return { pos, right, up, fwd, tanHalf, focus, aperture: S.camera.blur * S.camera.blur * 0.03 * focus };
 }
 
+// parti dello shader da escludere perche' la scena non le usa (compilazione molto piu' rapida)
+function traceDefs(pr, gr, wa, cl, terFloat, style) {
+  const d = [];
+  if (!terLayers.length) d.push('#define TER_N 0');
+  if (!terFloat.some(v => v > 0)) d.push('#define NO_FLOAT');
+  if (!pr.length) d.push('#define OBJ_N 0');
+  if (!pr.some(o => o.shape >= 3 && o.shape <= 10)) d.push('#define NO_SDF');
+  if (!pr.some(o => o.shape === 11)) d.push('#define NO_MESH');
+  if (!wa) d.push('#define NO_WATER');
+  if (!gr) d.push('#define NO_GROUND');
+  if (!cl || cl.cover <= 0.001) d.push('#define NO_CLOUDS');
+  d.push('#define STYLE ' + style);
+  return d;
+}
+// stato della compilazione del render: avviso a schermo mentre il driver lavora
+let traceErrShown = '';
+function traceReady() {
+  const st = R.prepareTrace(scene.defs);
+  const b = $('#busy');
+  if (st === 'compiling') {
+    if (!busy) { b.hidden = false; $('#busy-text').textContent = 'Preparo il render per questa scena…'; }
+  } else if (!busy && $('#busy-text').textContent.startsWith('Preparo il render')) b.hidden = true;
+  if (st === 'error' && traceErrShown !== R.traceError) {
+    traceErrShown = R.traceError;
+    toast('Il render non si compila su questa scheda grafica: ' + String(R.traceError).slice(0, 140));
+  }
+  return st === 'ready';
+}
+
 let lastMeshSig = '';
 function buildScene(final) {
   if (layersDirty) uploadLayers();
@@ -1073,6 +1102,7 @@ function buildScene(final) {
     terFloat,
     fogDensity: S.sky.fog > 0 ? 0.000003 + Math.pow(S.sky.fog, 2) * 0.0005 : 0, fogFalloff: 1 / S.sky.fogHeight,
     objCount: pr.length, objData,
+    defs: traceDefs(pr, gr, wa, cl, terFloat, style),
   };
   return scene;
 }
@@ -1173,14 +1203,16 @@ function frame(now) {
   if (!busy && (mode === 'final' || mode === 'done')) {
     if (mode === 'final') {
       if (!scene) buildScene(true);
-      adapt(dt, 90);
-      R.step(accFinal, scene, qualityFor('final'), budget);
-      if (accFinal.passes >= S.render.samples) {
-        mode = 'done';
-        $('#btnSave').hidden = false;
-        $('#btnCancel').textContent = 'Chiudi';
+      if (traceReady()) {
+        adapt(dt, 90);
+        R.step(accFinal, scene, qualityFor('final'), budget);
+        if (accFinal.passes >= S.render.samples) {
+          mode = 'done';
+          $('#btnSave').hidden = false;
+          $('#btnCancel').textContent = 'Chiudi';
+        }
+        needShow = true;
       }
-      needShow = true;
     }
     if (needShow) {
       const dpr = cv.width / cssW;
@@ -1190,8 +1222,15 @@ function frame(now) {
     }
     return;
   }
+  let ready = false;
   if (!busy && S.view.shading === 'render') {
     if (!scene) buildScene(false);
+    ready = traceReady();
+    // mentre il render si prepara si vede la scena 3D normale
+    world.visible = !ready;
+    cv.style.visibility = ready ? 'visible' : 'hidden';
+  }
+  if (ready) {
     const interacting = now - lastChange < 220 || dragging;
     let shown = null, worked = false;
     if (interacting || (accFull.passes === 0 && accFast.passes < 2)) {
@@ -2263,5 +2302,4 @@ if (QP.get('modello')) setTimeout(async () => {
   } catch (err) { console.log('PROVA errore', err.message, err.stack); }
 }, 1500);
 requestAnimationFrame(frame);
-if (R.lite) setTimeout(() => toast('Questo dispositivo usa la versione ridotta del render: forme speciali e modelli 3D non compaiono nel Render'), 1500);
 window.__orizzonte = { state: () => S };
