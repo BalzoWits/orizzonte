@@ -5,6 +5,7 @@ import { OBJLoader } from '../lib/OBJLoader.js';
 import { STLLoader } from '../lib/STLLoader.js';
 import { GLTFLoader } from '../lib/GLTFLoader.js';
 import { toCreasedNormals } from '../lib/BufferGeometryUtils.js';
+import { openDB } from './store.js?v=10';
 
 // ---------- lettura ----------
 // Restituisce i triangoli (Float32Array, 9 numeri per triangolo) in coordinate del file.
@@ -168,16 +169,7 @@ export function buildBVH(pos) {
 }
 
 // ---------- archivio nel browser ----------
-let dbp = null;
-function db() {
-  if (!dbp) dbp = new Promise((res, rej) => {
-    const r = indexedDB.open('orizzonte', 1);
-    r.onupgradeneeded = () => r.result.createObjectStore('meshes');
-    r.onsuccess = () => res(r.result);
-    r.onerror = () => rej(r.error);
-  });
-  return dbp;
-}
+const db = openDB;
 export async function saveMesh(id, rec) {
   try {
     const d = await db();

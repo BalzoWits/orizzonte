@@ -2,7 +2,9 @@
 import * as THREE from '../lib/three.module.js';
 import { OrbitControls } from '../lib/OrbitControls.js';
 import { TransformControls } from '../lib/TransformControls.js';
-import { readModelFile, normalizeTris, simplifyTris, computeNormals, buildBVH, saveMesh, loadMesh, deleteMesh, f32ToB64, b64ToF32 } from './models.js?v=9';
+import { readModelFile, normalizeTris, simplifyTris, computeNormals, buildBVH, saveMesh, loadMesh, deleteMesh, f32ToB64, b64ToF32 } from './models.js?v=10';
+import * as store from './store.js?v=10';
+import { Sync } from './cloud.js?v=10';
 
 const $ = s => document.querySelector(s);
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -274,7 +276,8 @@ function mergeDeep(a, b) {
   }
   return a;
 }
-function loadState() {
+// scena salvata dalla versione senza progetti (si trasforma nel primo progetto)
+function loadOldState() {
   try {
     const raw = localStorage.getItem(STORE);
     if (!raw) return null;
@@ -282,20 +285,162 @@ function loadState() {
     return Array.isArray(s.objects) ? s : null;
   } catch (e) { return null; }
 }
-let S = loadState() || PRESETS[0].make();
-if (QP.has('scena') && PRESETS[parseInt(QP.get('scena')) - 1]) S = PRESETS[parseInt(QP.get('scena')) - 1].make();
-if (QP.has('vista')) S.view.shading = QP.get('vista');
-if (QP.has('stile')) S.render.style = clamp(parseInt(QP.get('stile')) || 0, 0, 2);
-if (QP.has('cielo')) S.sky.mode = QP.get('cielo');
+let S = baseState();
+// scena di prova da URL (?scena=N): si apre senza toccare i progetti
+let TEST_SCENE = null;
+if (QP.has('scena') && PRESETS[parseInt(QP.get('scena')) - 1]) {
+  TEST_SCENE = PRESETS[parseInt(QP.get('scena')) - 1].make();
+  if (QP.has('vista')) TEST_SCENE.view.shading = QP.get('vista');
+  if (QP.has('stile')) TEST_SCENE.render.style = clamp(parseInt(QP.get('stile')) || 0, 0, 2);
+  if (QP.has('cielo')) TEST_SCENE.sky.mode = QP.get('cielo');
+}
 
+// ---------- progetti: salvataggio automatico nel browser e online ----------
+let project = null;          // { id, name, rev } del progetto aperto
+let loadingDoc = false;      // durante il caricamento i cambi non contano come modifiche
 let saveTimer = 0;
 function saveState() {
+  if (loadingDoc || !project) return;
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    syncCameraState();
-    try { localStorage.setItem(STORE, JSON.stringify(S)); } catch (e) { /* niente */ }
-  }, 300);
+  saveTimer = setTimeout(persistProject, 600);
 }
+async function persistProject() {
+  if (!project) return;
+  const id = project.id;
+  const doc = packDoc();
+  // si salva solo se e' cambiato davvero (aprire un progetto non e' una modifica)
+  const json = JSON.stringify(doc);
+  if (json === project.savedJson) return;
+  project.savedJson = json;
+  const prev = await store.loadProject(id);
+  await store.saveProject({ id, name: project.name, doc, rev: prev ? prev.rev || 0 : project.rev || 0, dirty: true, remoteOnly: false });
+  sync.schedulePush(id);
+}
+function markSaved() { if (project) project.savedJson = JSON.stringify(packDoc()); }
+// documento completo del progetto (i modelli 3D viaggiano dentro, codificati una volta sola)
+const meshB64 = new Map();
+function packDoc() {
+  syncCameraState();
+  const doc = JSON.parse(JSON.stringify(S));
+  doc.name = project ? project.name : 'Senza titolo';
+  const meshes = {};
+  for (const o of prims()) if (o.shape === 11 && meshStore.has(o.mesh) && !meshes[o.mesh]) {
+    let e = meshB64.get(o.mesh);
+    if (!e) {
+      const m = meshStore.get(o.mesh);
+      e = { name: m.name, half: m.half, orig: m.orig, pos: f32ToB64(m.pos), nor: f32ToB64(m.nor) };
+      meshB64.set(o.mesh, e);
+    }
+    meshes[o.mesh] = e;
+  }
+  doc.meshes = meshes;
+  return doc;
+}
+async function unpackDoc(doc) {
+  const raw = JSON.parse(JSON.stringify(doc));
+  const meshes = raw.meshes || {};
+  delete raw.meshes; delete raw.name;
+  for (const [id, m] of Object.entries(meshes)) {
+    if (meshStore.has(id)) continue;
+    const rec = { name: m.name, half: m.half, orig: m.orig, pos: b64ToF32(m.pos), nor: b64ToF32(m.nor) };
+    meshB64.set(id, m);
+    await saveMesh(id, rec);
+    prepareMesh(id, rec);
+  }
+  const ns = mergeDeep(baseState(), raw);
+  if (!Array.isArray(ns.objects)) throw new Error('progetto non valido');
+  return ns;
+}
+function showScene(ns) {
+  loadingDoc = true;
+  try { loadScene(ns); } finally { loadingDoc = false; }
+}
+// prima di cambiare progetto si salva quello aperto
+async function flushProject() { clearTimeout(saveTimer); await persistProject(); }
+async function openProject(id) {
+  try {
+    await flushProject();
+    const rec = await sync.ensureLocal(id);
+    if (!rec || !rec.doc) throw new Error('progetto vuoto');
+    const ns = await unpackDoc(rec.doc);
+    project = { id, name: rec.name, rev: rec.rev || 0 };
+    store.setLastProjectId(id);
+    showScene(ns);
+    markSaved();
+    sync.watch(id);
+    renderProjectBar();
+    if (curTab === 'scene') renderTab();
+  } catch (e) { toast('Non riesco ad aprire il progetto: ' + e.message); }
+}
+async function newProject(state, name) {
+  await flushProject();
+  const id = store.newId();
+  project = { id, name, rev: 0 };
+  store.setLastProjectId(id);
+  showScene(state);
+  markSaved();
+  await store.saveProject({ id, name, doc: packDoc(), rev: 0, dirty: true, remoteOnly: false });
+  sync.schedulePush(id);
+  sync.watch(id);
+  renderProjectBar();
+  if (curTab === 'scene') renderTab();
+}
+async function renameProject(id, name) {
+  name = name.trim().slice(0, 60);
+  if (!name) return;
+  if (project && project.id === id) { project.name = name; project.savedJson = ''; await persistProject(); }
+  else {
+    const rec = await store.loadProject(id);
+    if (!rec) return;
+    await store.saveProject({ ...rec, name, doc: rec.doc ? { ...rec.doc, name } : rec.doc, dirty: !!rec.doc });
+    if (rec.doc) sync.schedulePush(id);
+  }
+  renderProjectBar();
+  if (curTab === 'scene') renderTab();
+}
+async function duplicateProject(id) {
+  try {
+    if (project && project.id === id) await persistProject();
+    const rec = await sync.ensureLocal(id);
+    const nid = store.newId(), name = nextProjectName(rec.name + ' (copia)');
+    await store.saveProject({ ...rec, id: nid, name, doc: { ...rec.doc, name }, rev: 0, dirty: true, remoteOnly: false });
+    sync.schedulePush(nid);
+    toast('Creata la copia «' + name + '»');
+    if (curTab === 'scene') renderTab();
+  } catch (e) { toast('Copia non riuscita: ' + e.message); }
+}
+async function removeProject(id) {
+  await store.deleteProject(id);
+  await sync.remove(id);
+  if (project && project.id === id) {
+    const list = (await store.listProjects()).filter(p => !p.remoteOnly);
+    if (list.length) await openProject(list[0].id);
+    else await newProject(PRESETS.find(p => p.name === 'Scena vuota').make(), 'Senza titolo');
+  }
+  if (curTab === 'scene') renderTab();
+}
+let projNames = [];
+function nextProjectName(base) {
+  if (!projNames.includes(base)) return base;
+  for (let i = 2; ; i++) if (!projNames.includes(`${base} ${i}`)) return `${base} ${i}`;
+}
+
+const sync = new Sync({
+  store,
+  currentId: () => project && project.id,
+  onStatus: () => renderProjectBar(),
+  onUser: () => { renderProjectBar(); if (curTab === 'scene') renderTab(); },
+  onSynced: (id, rev) => { if (project && project.id === id) project.rev = rev; },
+  onRemoteDoc: async (id, doc, rev) => {
+    if (!project || project.id !== id) return;
+    project.rev = rev;
+    project.name = doc.name || project.name;
+    try { showScene(await unpackDoc(doc)); markSaved(); toast('Progetto aggiornato da un altro dispositivo'); } catch (e) { /* niente */ }
+    renderProjectBar();
+  },
+  askConflict: (local, remote) => askConflict(local, remote),
+  onListChanged: () => { if (curTab === 'scene') renderTab(); },
+});
 
 // ---------- utilita' ----------
 function lin(hex) {
@@ -1672,6 +1817,106 @@ function landObj(o) {
 }
 document.querySelectorAll('[data-create]').forEach(b => b.addEventListener('click', () => create(b.dataset.create)));
 
+// ---------- finestre di dialogo, account e barra del progetto ----------
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function modal(html, setup) {
+  const host = $('#modal'), box = $('#modalBox');
+  box.innerHTML = html;
+  host.hidden = false;
+  const close = () => { host.hidden = true; box.innerHTML = ''; };
+  host.onclick = e => { if (e.target === host) close(); };
+  box.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', close));
+  if (setup) setup(box, close);
+  return close;
+}
+function promptText(title, value, okLabel) {
+  return new Promise(resolve => {
+    let done = false;
+    modal(`<h2>${esc(title)}</h2><input type="text" class="name-in" id="promptIn" maxlength="60" value="${esc(value)}">
+      <footer><button class="btn" data-close>Annulla</button><button class="primary" data-ok>${esc(okLabel || 'OK')}</button></footer>`, (el, close) => {
+      const inp = el.querySelector('#promptIn');
+      inp.focus(); inp.select();
+      const ok = () => { done = true; close(); resolve(inp.value); };
+      el.querySelector('[data-ok]').addEventListener('click', ok);
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter') ok(); if (e.key === 'Escape') close(); });
+    });
+    const host = $('#modal');
+    const obs = new MutationObserver(() => { if (host.hidden) { obs.disconnect(); if (!done) resolve(null); } });
+    obs.observe(host, { attributes: true });
+  });
+}
+function confirmBox(title, text, okLabel) {
+  return new Promise(resolve => {
+    let done = false;
+    modal(`<h2>${esc(title)}</h2><p class="note">${esc(text)}</p>
+      <footer><button class="btn" data-close>Annulla</button><button class="primary danger-bg" data-ok>${esc(okLabel)}</button></footer>`, (el, close) => {
+      el.querySelector('[data-ok]').addEventListener('click', () => { done = true; close(); resolve(true); });
+    });
+    const host = $('#modal');
+    const obs = new MutationObserver(() => { if (host.hidden) { obs.disconnect(); if (!done) resolve(false); } });
+    obs.observe(host, { attributes: true });
+  });
+}
+function askConflict(local, remote) {
+  const when = t => (t ? new Date(t).toLocaleString('it-IT', { dateStyle: 'short', timeStyle: 'short' }) : '?');
+  return new Promise(resolve => {
+    let done = false;
+    modal(`<h2>Modificato su due dispositivi</h2>
+      <p class="note">«${esc(local.name)}» è stato salvato su un altro dispositivo (${when(remote && remote.updated)}) mentre lo modificavi qui (${when(local.updated)}). Quale versione tieni?</p>
+      <div class="conflict">
+        <button class="btn" data-c="local"><b>Questo dispositivo</b><small>sovrascrive la versione online</small></button>
+        <button class="btn" data-c="remote"><b>L’altro dispositivo</b><small>le modifiche fatte qui si perdono</small></button>
+        <button class="btn" data-c="both"><b>Tieni entrambe</b><small>questa diventa una copia separata</small></button>
+      </div>`, (el, close) => {
+      el.addEventListener('click', e => { const b = e.target.closest('[data-c]'); if (b) { done = true; close(); resolve(b.dataset.c); } });
+    });
+    // chiusa senza scelta: non si perde niente, si tengono entrambe
+    const host = $('#modal');
+    const obs = new MutationObserver(() => { if (host.hidden) { obs.disconnect(); if (!done) resolve('both'); } });
+    obs.observe(host, { attributes: true });
+  });
+}
+const CLOUD_UI = {
+  out: 'Accedi per salvare online', sync: 'Sincronizzo…', ok: 'Salvato online', pending: 'Da caricare online',
+  offline: 'Offline: caricherò al ritorno della rete', warn: '', error: 'Errore di sincronizzazione',
+};
+const CLOUD_ICON = '<svg viewBox="0 0 24 24"><path d="M7 18h11a4 4 0 0 0 0-8 6 6 0 0 0-11.5 1.5A3.3 3.3 0 0 0 7 18z"/></svg>';
+function renderProjectBar() {
+  const n = $('#projName');
+  if (n) { n.textContent = project ? project.name : 'Scena di prova'; n.disabled = !project; }
+  const b = $('#btnCloud');
+  if (!b) return;
+  const st = sync.status;
+  b.innerHTML = CLOUD_ICON + (sync.user && sync.user.photo ? `<img src="${esc(sync.user.photo)}" alt="" referrerpolicy="no-referrer">` : '');
+  b.title = st.msg || CLOUD_UI[st.state] || '';
+  b.className = 'cloudbtn ' + st.state;
+}
+function openAccount() {
+  const u = sync.user, st = sync.status;
+  modal(`<h2>Salvataggio online</h2>
+    ${u ? `<div class="acct">${u.photo ? `<img src="${esc(u.photo)}" alt="" referrerpolicy="no-referrer">` : ''}<div><b>${esc(u.name || '')}</b><small>${esc(u.email || '')}</small></div></div>
+      <p class="note">${esc(st.msg || CLOUD_UI[st.state] || '')}. I progetti si salvano online da soli e li ritrovi su ogni dispositivo in cui accedi con questo account (lo stesso di Officina). Solo tu puoi vederli.</p>
+      <footer><button class="btn" data-out>Esci</button><span class="grow"></span><button class="btn" data-syncnow>Sincronizza ora</button><button class="primary" data-close>Chiudi</button></footer>`
+    : `<p class="note">Accedi con Google per ritrovare i tuoi progetti su PC, iPad e telefono. Ogni modifica si salva online da sola; senza rete continui a lavorare e si carica al ritorno della connessione. Solo tu puoi vedere i tuoi progetti.</p>
+      <footer><button class="btn" data-close>Non ora</button><button class="primary" data-in>Accedi con Google</button></footer>`}`, (el, close) => {
+    el.addEventListener('click', async e => {
+      const t = e.target.closest('button');
+      if (!t) return;
+      try {
+        if (t.dataset.in !== undefined) { close(); await sync.signIn(); }
+        else if (t.dataset.out !== undefined) { close(); await sync.signOut(); toast('Disconnesso: i progetti restano su questo dispositivo'); }
+        else if (t.dataset.syncnow !== undefined) { close(); await sync.syncAll(); }
+      } catch (err) { toast('Accesso non riuscito: ' + err.message); }
+    });
+  });
+}
+$('#btnCloud').addEventListener('click', openAccount);
+$('#projName').addEventListener('click', async () => {
+  if (!project) return;
+  const v = await promptText('Nome del progetto', project.name, 'Rinomina');
+  if (v) renameProject(project.id, v);
+});
+
 // ---------- toast ----------
 function toast(msg) {
   const t = $('#toast');
@@ -1928,30 +2173,59 @@ const TABS = {
     select2(s4, 'Massimo triangoli per modello', bind(S.render, 'modelTris'), { 15000: '15.000 (leggero)', 30000: '30.000', 60000: '60.000 (consigliato)', 120000: '120.000', 250000: '250.000 (pesante)' }, saveState);
   },
   scene() {
-    const s = section('Scene pronte', 'Un punto di partenza da modificare. Sostituisce la scena attuale.');
+    const u = sync.user;
+    const s0 = section('I miei progetti', u ? `Salvati online con ${u.email || 'il tuo account'}: li ritrovi su ogni dispositivo.` : 'Salvati in questo browser. Accedi con Google per averli anche online, su ogni dispositivo.');
+    const top = el('div', 'row');
+    button(top, '+ Nuovo progetto', () => newProject(PRESETS.find(p => p.name === 'Scena vuota').make(), nextProjectName('Senza titolo')), 'accent');
+    if (!u) button(top, 'Accedi con Google', openAccount);
+    s0.appendChild(top);
+    const list = el('div', 'projlist', '<p class="hint">Carico…</p>');
+    s0.appendChild(list);
+    store.listProjects().then(items => {
+      if (curTab !== 'scene') return;
+      projNames = items.map(p => p.name);
+      list.innerHTML = '';
+      const when = t => t ? new Date(t).toLocaleString('it-IT', { dateStyle: 'short', timeStyle: 'short' }) : '';
+      for (const p of items) {
+        const row = el('div', 'pj-row');
+        const info = p.remoteOnly ? 'solo online' : (u && p.dirty ? 'da caricare · ' : '') + when(p.updated);
+        const b = el('button', 'pj-open' + (project && project.id === p.id ? ' on' : ''), `<b>${esc(p.name)}</b><small>${esc(info)}</small>`);
+        b.type = 'button';
+        b.addEventListener('click', () => { if (!project || project.id !== p.id) openProject(p.id); });
+        const ren = el('button', 'ol-act', '<svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16zM14 6l4 4"/></svg>');
+        ren.type = 'button'; ren.title = 'Rinomina';
+        ren.addEventListener('click', async () => { const v = await promptText('Nome del progetto', p.name, 'Rinomina'); if (v) renameProject(p.id, v); });
+        const dup = el('button', 'ol-act', '<svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg>');
+        dup.type = 'button'; dup.title = 'Duplica';
+        dup.addEventListener('click', () => duplicateProject(p.id));
+        const del = el('button', 'ol-act del', `<svg viewBox="0 0 24 24">${TRASH}</svg>`);
+        del.type = 'button'; del.title = 'Elimina';
+        del.addEventListener('click', async () => {
+          if (await confirmBox('Eliminare il progetto?', `«${p.name}» sparisce da questo browser${u ? ' e dal salvataggio online' : ''}. Non si può annullare.`, 'Elimina')) removeProject(p.id);
+        });
+        row.append(b, ren, dup, del);
+        list.appendChild(row);
+      }
+      if (!items.length) list.innerHTML = '<p class="hint">Nessun progetto.</p>';
+    });
+    const s = section('Scene pronte', 'Ognuna si apre come nuovo progetto: quello attuale resta salvato.');
     const grid = el('div', 'presets');
     PRESETS.forEach(p => {
       const b = el('button', 'preset', `<strong>${p.name}</strong><span>${p.desc}</span>`);
       b.type = 'button';
-      b.addEventListener('click', () => loadScene(p.make()));
+      b.addEventListener('click', () => newProject(p.make(), nextProjectName(p.name)));
       grid.appendChild(b);
     });
     s.appendChild(grid);
     const s2 = section('Sorprendimi');
-    button(s2, 'Scena casuale', randomScene, 'wide');
-    const s3 = section('File della scena', 'La scena si salva da sola in questo browser. Per spostarla altrove esportala in un file.');
+    button(s2, 'Scena casuale (nuovo progetto)', randomScene, 'wide');
+    const s3 = section('File', 'Per passare un progetto a qualcuno o tenerne una copia: il file contiene anche immagini e modelli 3D.');
     const row = el('div', 'row');
     button(row, 'Esporta', () => {
-      syncCameraState();
-      // i modelli 3D viaggiano dentro il file della scena
-      const meshes = {};
-      for (const o of prims()) if (o.shape === 11 && meshStore.has(o.mesh) && !meshes[o.mesh]) {
-        const m = meshStore.get(o.mesh);
-        meshes[o.mesh] = { name: m.name, half: m.half, orig: m.orig, pos: f32ToB64(m.pos), nor: f32ToB64(m.nor) };
-      }
-      download(new Blob([JSON.stringify(Object.assign({}, S, { meshes }))], { type: 'application/json' }), 'scena-orizzonte.json');
+      const name = (project ? project.name : 'scena').replace(/[^\w\- àèéìòù]/gi, '').trim() || 'scena';
+      download(new Blob([JSON.stringify(packDoc())], { type: 'application/json' }), name + '.orizzonte.json');
     });
-    button(row, 'Importa…', () => $('#importFile').click());
+    button(row, 'Importa come nuovo progetto…', () => $('#importFile').click());
     s3.appendChild(row);
   },
 };
@@ -2253,32 +2527,48 @@ function randomScene() {
   s.camera.snap = camSnap(rnd(-Math.PI, Math.PI), rnd(0.04, 0.25), rnd(4000, 9000));
   s.render = Object.assign({}, S.render);
   s.view = Object.assign({}, S.view);
-  loadScene(s);
+  newProject(s, nextProjectName('Scena casuale'));
 }
 $('#importFile').addEventListener('change', async e => {
   const f = e.target.files[0];
   if (!f) return;
   try {
     const raw = JSON.parse(await f.text());
-    const meshes = raw.meshes || {};
-    delete raw.meshes;
-    for (const [id, m] of Object.entries(meshes)) {
-      const rec = { name: m.name, half: m.half, orig: m.orig, pos: b64ToF32(m.pos), nor: b64ToF32(m.nor) };
-      await saveMesh(id, rec);
-      prepareMesh(id, rec);
-    }
-    const ns = mergeDeep(baseState(), raw);
-    if (!Array.isArray(ns.objects)) throw new Error('niente oggetti');
+    const ns = await unpackDoc(raw);
     ns.camera.snap = null;
-    loadScene(ns);
-    toast('Scena importata');
+    const name = raw.name || f.name.replace(/(\.orizzonte)?\.json$/i, '') || 'Importato';
+    await newProject(ns, nextProjectName(name));
+    toast('Progetto importato');
   } catch (err) { toast('File non valido'); }
   e.target.value = '';
 });
 
 // ---------- avvio ----------
 setGizmo('translate');
-loadScene(S);
+showScene(S);
+renderProjectBar();
+(async () => {
+  if (TEST_SCENE) { showScene(TEST_SCENE); return; }
+  sync.start();
+  try {
+    const list = await store.listProjects();
+    if (!list.length) {
+      // primo avvio con i progetti: la scena della versione precedente diventa il primo progetto
+      const old = loadOldState();
+      if (old) await newProject(old, 'La mia scena');
+      else await newProject(PRESETS[0].make(), PRESETS[0].name);
+      return;
+    }
+    const last = store.lastProjectId();
+    const local = list.filter(p => !p.remoteOnly);
+    const pick = local.find(p => p.id === last) || local[0] || list[0];
+    await openProject(pick.id);
+  } catch (e) {
+    console.error(e);
+    toast('Archivio del browser non disponibile: la scena non verrà salvata');
+    showScene(PRESETS[0].make());
+  }
+})();
 // prova automatica del render finale: ?finale=campioni
 if (QP.get('finale')) {
   const wait = () => { if (busy || genQueue.length) return setTimeout(wait, 200); S.render.samples = parseInt(QP.get('finale')); S.render.size = 1280; startFinal(); };
@@ -2302,4 +2592,9 @@ if (QP.get('modello')) setTimeout(async () => {
   } catch (err) { console.log('PROVA errore', err.message, err.stack); }
 }, 1500);
 requestAnimationFrame(frame);
-window.__orizzonte = { state: () => S };
+// aggancio per le prove automatiche
+window.__orizzonte = {
+  state: () => S, project: () => project, list: () => store.listProjects(),
+  newProject: (i, name) => newProject(PRESETS[i].make(), name), openProject, renameProject, duplicateProject, removeProject,
+  addSphere: () => create('sphere'), showTab: t => { curTab = t; renderTab(); },
+};

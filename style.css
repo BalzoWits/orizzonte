@@ -51,6 +51,51 @@ body.final .stage { cursor: progress; }
 .guide { position: absolute; pointer-events: none; outline: 1px dashed rgba(255,255,255,.35); box-shadow: 0 0 0 9999px rgba(0,0,0,.28); }
 body.final .guide, body.final #vp, body.final .vtools { display: none; }
 
+/* progetto e salvataggio online */
+.projname {
+  background: none; border: 1px solid transparent; border-radius: 7px; padding: 4px 8px; cursor: pointer;
+  font-weight: 600; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.projname:hover:not(:disabled) { border-color: var(--line); background: var(--panel-2); }
+.projname:disabled { cursor: default; color: var(--muted); }
+.cloudbtn {
+  position: relative; display: flex; align-items: center; justify-content: center; width: 36px; height: 34px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; cursor: pointer; color: var(--muted); padding: 0;
+}
+.cloudbtn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; }
+.cloudbtn img { position: absolute; right: -5px; bottom: -5px; width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--panel); }
+.cloudbtn.ok { color: #7fcf8f; }
+.cloudbtn.sync, .cloudbtn.pending { color: var(--accent); }
+.cloudbtn.sync svg { animation: pulse 1s ease-in-out infinite; }
+.cloudbtn.error, .cloudbtn.warn, .cloudbtn.offline { color: var(--danger); }
+@keyframes pulse { 50% { opacity: .35; } }
+
+.modal { position: fixed; inset: 0; background: rgba(5,7,10,.6); display: grid; place-items: center; padding: 16px; z-index: 50; }
+.modal-box { width: min(440px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+.modal-box h2 { margin: 0 0 10px; font-size: 17px; }
+.modal-box .note { color: var(--muted); font-size: 13.5px; margin: 0 0 14px; }
+.modal-box footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; align-items: center; }
+.modal-box .grow { flex: 1; }
+.primary.danger-bg { background: var(--danger); color: #1c0d0a; }
+.conflict { display: flex; flex-direction: column; gap: 8px; }
+.conflict .btn { text-align: left; display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; }
+.conflict small, .acct small { color: var(--muted); font-size: 12px; }
+.acct { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
+.acct img { width: 40px; height: 40px; border-radius: 50%; }
+.acct div { display: flex; flex-direction: column; }
+
+.projlist { display: flex; flex-direction: column; gap: 2px; margin-bottom: 12px; }
+.pj-row { display: flex; align-items: center; gap: 2px; }
+.pj-open {
+  flex: 1; min-width: 0; text-align: left; background: none; border: 1px solid transparent; border-radius: 8px; padding: 6px 8px; cursor: pointer;
+  display: flex; flex-direction: column; gap: 1px;
+}
+.pj-open:hover { background: var(--panel-2); }
+.pj-open.on { background: rgba(242,180,90,.12); border-color: rgba(242,180,90,.45); }
+.pj-open b { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pj-open.on b { color: var(--accent); }
+.pj-open small { color: var(--muted); font-size: 11.5px; }
+
 /* comandi della camera */
 .nav {
   position: absolute; right: 12px; bottom: 44px; display: flex; flex-direction: column; gap: 8px; align-items: stretch;
@@ -247,6 +292,8 @@ input[type=color] { width: 44px; height: 28px; border: 1px solid var(--line); bo
   .help { display: none; }
   .top { gap: 10px; }
   .top .primary span { display: none; }
+  .top .status { display: none; }
+  .projname { flex: 1; max-width: none; }
   .seg button span { display: none; }
   .createbar button { min-width: 50px; }
   .nav { width: 168px; bottom: 10px; right: 8px; padding: 6px; }
