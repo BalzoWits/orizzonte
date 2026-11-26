@@ -12,7 +12,14 @@ class Renderer {
     this.canvas = canvas;
 
     this.progSky = this.program(VS_QUAD, FS_SKY);
-    this.progTrace = this.program(VS_QUAD, FS_TRACE);
+    // se lo shader completo non compila (alcuni driver), si riprova senza forme a distanza e modelli
+    this.lite = false;
+    try { this.progTrace = this.program(VS_QUAD, FS_TRACE); }
+    catch (e) {
+      console.warn('Shader completo non compilato, uso la versione ridotta', e.message);
+      this.progTrace = this.program(VS_QUAD, FS_TRACE.replace('#define MAX_TER', '#define LITE\n#define MAX_TER'));
+      this.lite = true;
+    }
     this.progShow = this.program(VS_QUAD, FS_SHOW);
 
     const vao = gl.createVertexArray();

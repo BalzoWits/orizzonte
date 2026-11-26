@@ -191,7 +191,7 @@ float hg(float c, float g){ float g2 = g*g; return (1.0 - g2) / (4.0*PI*pow(max(
 vec3 skyTex(vec3 d){
   float u = atan(d.z, d.x) / (2.0*PI) + 0.5;
   float v = asin(clamp(d.y, -1.0, 1.0)) / PI + 0.5;
-  return texture(uSky, vec2(u, v)).rgb;
+  return textureLod(uSky, vec2(u, v), 0.0).rgb;
 }
 // stelle (cielo spaziale): punti nitidi calcolati per direzione, non nella texture
 vec3 starField(vec3 d){
@@ -223,18 +223,18 @@ vec3 skyRadiance(vec3 d, bool withSun){
 float terH(int i, vec2 q){
   vec4 S = uTerSize[i];
   vec2 uv = q / S.xz + 0.5;
-  float h = texture(uHeights, vec3(uv, S.w)).r * S.y;
+  float h = textureLod(uHeights, vec3(uv, S.w), 0.0).r * S.y;
   float m = smoothstep(0.0, 0.06*S.y, h);
   float f = 1.0 / max(S.x, S.z);
-  h += ((texture(uNoise, vec3(q*f*17.6, 0.37)).r - 0.5)*0.03
-      + (texture(uNoise, vec3(q*f*75.0, 0.81)).g - 0.5)*0.01) * S.y * m;
+  h += ((textureLod(uNoise, vec3(q*f*17.6, 0.37), 0.0).r - 0.5)*0.03
+      + (textureLod(uNoise, vec3(q*f*75.0, 0.81), 0.0).g - 0.5)*0.01) * S.y * m;
   return h;
 }
 // sotto dei terreni sospesi: la forma si specchia verso il basso, frastagliata
 float terBot(int i, vec2 q, float h){
   vec4 S = uTerSize[i];
   float f = 1.0 / max(S.x, S.z);
-  float n = texture(uNoise, vec3(q*f*23.0, 0.55)).r*0.7 + texture(uNoise, vec3(q*f*90.0, 0.15)).g*0.3;
+  float n = textureLod(uNoise, vec3(q*f*23.0, 0.55), 0.0).r*0.7 + textureLod(uNoise, vec3(q*f*90.0, 0.15), 0.0).g*0.3;
   return -uTerFloat[i] * h * (0.55 + 0.9*n);
 }
 // distanza (approssimata) dalla superficie: > 0 fuori, < 0 dentro la roccia
@@ -243,18 +243,17 @@ float terF(int i, vec3 p){
   if (uTerFloat[i] <= 0.0) return p.y - h;
   return max(p.y - h, terBot(i, p.xz, h) - p.y);
 }
-vec3 terNormalLocal(int i, vec2 q, float t){
+// normale sopra (bottom = false) o sotto: differenze centrali, una sola chiamata in un ciclo
+vec3 terNormalAny(int i, vec2 q, float t, bool bottom){
   float e = max(0.5, t*0.0012);
-  float hx = terH(i, q + vec2(e, 0.0)) - terH(i, q - vec2(e, 0.0));
-  float hz = terH(i, q + vec2(0.0, e)) - terH(i, q - vec2(0.0, e));
-  return normalize(vec3(-hx, 2.0*e, -hz));
-}
-vec3 terBotNormalLocal(int i, vec2 q, float t){
-  float e = max(0.5, t*0.0012);
-  vec2 dx = vec2(e, 0.0), dz = vec2(0.0, e);
-  float gx = terBot(i, q + dx, terH(i, q + dx)) - terBot(i, q - dx, terH(i, q - dx));
-  float gz = terBot(i, q + dz, terH(i, q + dz)) - terBot(i, q - dz, terH(i, q - dz));
-  return normalize(vec3(gx, -2.0*e, gz));
+  float v[4];
+  for (int k = 0; k < 4; k++){
+    vec2 o = k == 0 ? vec2(e, 0.0) : k == 1 ? vec2(-e, 0.0) : k == 2 ? vec2(0.0, e) : vec2(0.0, -e);
+    float h = terH(i, q + o);
+    v[k] = bottom ? terBot(i, q + o, h) : h;
+  }
+  float gx = v[0] - v[1], gz = v[2] - v[3];
+  return bottom ? normalize(vec3(gx, -2.0*e, gz)) : normalize(vec3(-gx, 2.0*e, -gz));
 }
 bool traceTer(int i, vec3 ro, vec3 rd, float tmax, int steps, float k, out float tHit){
   vec4 P = uTerPos[i], S = uTerSize[i];
@@ -267,26 +266,30 @@ bool traceTer(int i, vec3 ro, vec3 rd, float tmax, int steps, float k, out float
   float ta = max(max(tmn.x, tmn.y), max(tmn.z, 0.0));
   float tb = min(min(tmx.x, tmx.y), min(tmx.z, tmax));
   if (ta >= tb) return false;
-  float t = ta;
-  vec3 p = lo + ld*t;
-  float d = terF(i, p);
-  if (d < 0.0 && ta > 0.0) { tHit = t; return true; }
+  // marcia e affinamento (bisezione) nello stesso ciclo: terF compare una volta sola
   float minStep = max(0.05, 0.0004*max(S.x, S.z));
-  for (int s = 0; s < 700; s++){
-    if (s >= steps) break;
-    float tp = t;
+  float t = ta, tp = ta, a = 0.0, b = 0.0;
+  bool refine = false;
+  int ri = 0, ms = 0;
+  for (int s = 0; s < 720; s++){
+    float tt = refine ? 0.5*(a + b) : t;
+    float d = terF(i, lo + ld*tt);
+    if (refine){
+      if (d < 0.0) b = tt; else a = tt;
+      ri++;
+      if (ri >= 7){ tHit = b; return true; }
+      continue;
+    }
+    if (d < 0.0){
+      if (ms == 0){ tHit = t; return true; }
+      refine = true; a = tp; b = t;
+      continue;
+    }
+    if (ms >= steps) return false;
+    ms++;
+    tp = t;
     t += max(d*k, minStep + t*0.0012);
     if (t > tb) return false;
-    p = lo + ld*t;
-    d = terF(i, p);
-    if (d < 0.0){
-      float a = tp, b = t;
-      for (int j = 0; j < 7; j++){
-        float m = 0.5*(a + b);
-        if (terF(i, lo + ld*m) < 0.0) b = m; else a = m;
-      }
-      tHit = b; return true;
-    }
   }
   return false;
 }
@@ -339,10 +342,13 @@ float sdfObj(int i, int shape, vec3 q){
   return max(abs(length(q) - (1.0 - t)) - t, -q.y);
 }
 vec3 sdfNormal(int i, int shape, vec3 q){
-  const vec2 k = vec2(1.0, -1.0);
-  const float e = 0.0008;
-  return normalize(k.xyy*sdfObj(i, shape, q + k.xyy*e) + k.yyx*sdfObj(i, shape, q + k.yyx*e)
-                 + k.yxy*sdfObj(i, shape, q + k.yxy*e) + k.xxx*sdfObj(i, shape, q + k.xxx*e));
+  // un solo sdfObj in un ciclo: meno codice da compilare
+  vec3 n = vec3(0);
+  for (int k = 0; k < 4; k++){
+    vec3 e = vec3(((k + 3) >> 1) & 1, (k >> 1) & 1, k & 1) * 2.0 - 1.0;
+    n += e * sdfObj(i, shape, q + e*0.0008);
+  }
+  return normalize(n);
 }
 
 vec4 MNf(int i){ return texelFetch(uMeshNodes, ivec2(i % ${MESH_TEX_W}, i / ${MESH_TEX_W}), 0); }
@@ -449,6 +455,10 @@ bool hitObject(int i, vec3 ro, vec3 rd, out float tOut, out vec3 nOut, out vec3 
       }
     }
     if (t >= INF) return false;
+#ifdef LITE
+  } else {
+    return false;
+#else
   } else if (shape == 11){
     int root = int(OT(i, 9).y + 0.5);
     if (OT(i, 9).y < 0.0 || !traceMesh(root, lo, ld, eps, t, nl)) return false;
@@ -461,10 +471,12 @@ bool hitObject(int i, vec3 ro, vec3 rd, out float tOut, out vec3 nOut, out vec3 
     if (tn > tf || tf < eps) return false;
     float il = 1.0 / length(ld);
     float tt = max(tn, eps);
-    float sg = sdfObj(i, shape, lo + ld*tt) < 0.0 ? -1.0 : 1.0;
+    float sg = 1.0;
     bool hit = false;
     for (int k = 0; k < 160; k++){
-      float d = sg * sdfObj(i, shape, lo + ld*tt);
+      float d0 = sdfObj(i, shape, lo + ld*tt);
+      if (k == 0) sg = d0 < 0.0 ? -1.0 : 1.0;
+      float d = sg * d0;
       if (d < 0.0004){ hit = true; break; }
       tt += d * il;
       if (tt > tf) break;
@@ -472,6 +484,7 @@ bool hitObject(int i, vec3 ro, vec3 rd, out float tOut, out vec3 nOut, out vec3 
     if (!hit) return false;
     t = tt;
     nl = sdfNormal(i, shape, lo + ld*t);
+#endif
   }
   tOut = t;
   lp = (lo + ld*t) * s;
@@ -512,15 +525,15 @@ float cloudDens(vec3 p, bool detail){
   float hN = (p.y - uCloudBottom) / th;
   if (hN < 0.0 || hN > 1.0) return 0.0;
   vec3 q = p / uCloudScale;
-  vec4 big = texture(uNoise, q*vec3(0.18, 0.5, 0.18) + vec3(0.13, 0.0, 0.71));
-  vec4 n = texture(uNoise, q*vec3(1.0, 0.8, 1.0));
+  vec4 big = textureLod(uNoise, q*vec3(0.18, 0.5, 0.18) + vec3(0.13, 0.0, 0.71), 0.0);
+  vec4 n = textureLod(uNoise, q*vec3(1.0, 0.8, 1.0), 0.0);
   float cover = clamp(uCloudCover * (0.55 + 0.9*big.a), 0.0, 1.0);
   float prof = smoothstep(0.0, 0.12, hN) * smoothstep(1.0, 0.3 + 0.3*big.r, hN);
   float base = n.r*0.55 + n.b*0.45;
   float d = (base - (1.0 - cover)) / max(cover, 0.05);
   d = clamp(d, 0.0, 1.0) * prof;
   if (detail && d > 0.0){
-    float det = texture(uNoise, q*4.3).g*0.6 + texture(uNoise, q*9.1).b*0.4;
+    float det = textureLod(uNoise, q*4.3, 0.0).g*0.6 + textureLod(uNoise, q*9.1, 0.0).b*0.4;
     d = clamp((d - det*0.32*(1.0 - d*0.5)) / 0.7, 0.0, 1.0);
   }
   return d;
@@ -599,9 +612,9 @@ void applyFog(vec3 ro, vec3 rd, float t, inout vec3 L, inout vec3 T){
 
 // ---------- acqua ----------
 float waveH(vec2 q){
-  return texture(uNoise, vec3(q*0.011, 0.31)).r * 0.55
-       + texture(uNoise, vec3(q*0.037 + 0.4, 0.73)).g * 0.3
-       + texture(uNoise, vec3(q*0.13 + 0.2, 0.12)).r * 0.15;
+  return textureLod(uNoise, vec3(q*0.011, 0.31), 0.0).r * 0.55
+       + textureLod(uNoise, vec3(q*0.037 + 0.4, 0.73), 0.0).g * 0.3
+       + textureLod(uNoise, vec3(q*0.13 + 0.2, 0.12), 0.0).r * 0.15;
 }
 vec3 waterNormal(vec3 p, float dist){
   float e = 0.6;
@@ -621,7 +634,7 @@ vec3 waterSigma(){
 struct Surf { vec3 albedo; vec3 n; int type; float rough; vec3 emit; float mirror; float shine; };
 
 vec3 imageTex(vec2 uv, float layer){
-  vec3 c = texture(uImages, vec3(fract(uv), layer)).rgb;
+  vec3 c = textureLod(uImages, vec3(fract(uv), layer), 0.0).rgb;
   return pow(c, vec3(2.2));
 }
 // motivi: 0 tinta unita, 1 scacchiera, 2 marmo psichedelico, 3 strisce, 4 sfumatura (yu -1..1), 5 immagine
@@ -632,7 +645,7 @@ vec3 pattern(int pat, vec3 p, float sc, vec3 c1, vec3 c2, vec3 c3, float yu, vec
   }
   if (pat == 2){
     vec3 r = p / sc;
-    float n = texture(uNoise, r*0.13).r*0.55 + texture(uNoise, r*0.29).g*0.3 + texture(uNoise, r*0.61).r*0.15;
+    float n = textureLod(uNoise, r*0.13, 0.0).r*0.55 + textureLod(uNoise, r*0.29, 0.0).g*0.3 + textureLod(uNoise, r*0.61, 0.0).r*0.15;
     float v = sin((r.x*0.7 + r.y*0.45 + r.z*0.3) + n*11.0)*0.5 + 0.5;
     return v < 0.5 ? mix(c1, c2, smoothstep(0.0, 0.5, v)) : mix(c2, c3, smoothstep(0.5, 1.0, v));
   }
@@ -655,10 +668,10 @@ Surf groundSurf(vec3 p){
     s.albedo = clamp(s.albedo, 0.0, 0.95);
     return s;
   }
-  float n1 = texture(uNoise, p*0.00055).r, n2 = texture(uNoise, p*0.0031).g, n3 = texture(uNoise, p*0.019).r;
+  float n1 = textureLod(uNoise, p*0.00055, 0.0).r, n2 = textureLod(uNoise, p*0.0031, 0.0).g, n3 = textureLod(uNoise, p*0.019, 0.0).r;
   s.albedo = clamp(uGroundColor * (0.7 + 0.35*n1 + 0.25*n2) * (0.9 + 0.2*n3), 0.0, 0.95);
   if (uStyle != 2 && s.mirror < 0.01){
-    vec4 nn = texture(uNoise, p*0.021);
+    vec4 nn = textureLod(uNoise, p*0.021, 0.0);
     s.n = normalize(vec3(0,1,0) + vec3(nn.r - 0.5, 0.0, nn.b - 0.45)*0.25);
   }
   return s;
@@ -668,21 +681,22 @@ Surf terrainSurf(int i, vec3 p, float dist){
   Surf s; s.type = 0; s.rough = 1.0; s.emit = vec3(0); s.mirror = 0.0; s.shine = 0.0;
   vec4 P = uTerPos[i], S = uTerSize[i];
   vec3 q = rotY(p - P.xyz, -P.w);
-  float flow = texture(uFlows, vec3(q.xz / S.xz + 0.5, S.w)).r;
-  if (uTerFloat[i] > 0.0 && q.y < -0.5){
+  float flow = textureLod(uFlows, vec3(q.xz / S.xz + 0.5, S.w), 0.0).r;
+  bool bottom = uTerFloat[i] > 0.0 && q.y < -0.5;
+  vec3 n = rotY(terNormalAny(i, q.xz, dist, bottom), P.w);
+  if (bottom){
     // parte sotto di un'isola sospesa: roccia nuda
-    s.n = rotY(terBotNormalLocal(i, q.xz, dist), P.w);
-    float m1 = texture(uNoise, p*0.004).r, m2 = texture(uNoise, p*0.02).g;
+    s.n = n;
+    float m1 = textureLod(uNoise, p*0.004, 0.0).r, m2 = textureLod(uNoise, p*0.02, 0.0).g;
     vec3 rk = uTerRock[i] * (0.55 + 0.6*m2) * (0.75 + 0.5*m1);
     rk *= 0.85 + 0.15*sin(q.y*0.08 + m1*8.0);
     s.albedo = clamp(rk, 0.0, 0.9);
     return s;
   }
-  vec3 n = rotY(terNormalLocal(i, q.xz, dist), P.w);
-  float n1 = texture(uNoise, p*0.00055).r;
-  float n2 = texture(uNoise, p*0.0031).g;
-  float n3 = texture(uNoise, p*0.019).r;
-  float n4 = texture(uNoise, p*vec3(0.012, 0.004, 0.012)).b;
+  float n1 = textureLod(uNoise, p*0.00055, 0.0).r;
+  float n2 = textureLod(uNoise, p*0.0031, 0.0).g;
+  float n3 = textureLod(uNoise, p*0.019, 0.0).r;
+  float n4 = textureLod(uNoise, p*vec3(0.012, 0.004, 0.012), 0.0).b;
   float hN = q.y / S.y;
   float slope = 1.0 - n.y;
   vec3 col = mix(uTerLow[i], uTerMid[i], smoothstep(0.08, 0.55, hN + (n1 - 0.5)*0.35));
@@ -700,7 +714,7 @@ Surf terrainSurf(int i, vec3 p, float dist){
   float snow = smoothstep(uTerMat[i].x - 0.025, uTerMat[i].x + 0.025, hN + (n1 - 0.5)*0.12 - slope*0.45 + flow*0.05);
   col = mix(col, uTerSnow[i] * (0.92 + 0.08*n3), snow);
   if (uStyle != 2){
-    vec4 nn = texture(uNoise, p*0.021);
+    vec4 nn = textureLod(uNoise, p*0.021, 0.0);
     float bump = mix(0.25, 0.75, rockAmt) * (1.0 - snow*0.6);
     n = normalize(n + (nn.rgb - vec3(0.5, 0.5, 0.45))*vec3(1.0, 0.0, 1.0)*bump);
   }
@@ -948,13 +962,16 @@ void main(){
   vec3 c = radiance(ro, dir);
   if (uStyle == 2){
     // contorni a inchiostro dove cambia oggetto o la distanza salta
+    // un solo traceScene in un ciclo (tre raggi): meno codice da compilare
     vec2 fc = gl_FragCoord.xy - 0.5 + jit;
-    int i0, i1, i2;
-    float d0 = primaryDepth(fc, i0);
-    float d1 = primaryDepth(fc + vec2(1.2, 0.0), i1);
-    float d2 = primaryDepth(fc + vec2(0.0, 1.2), i2);
-    float rel = max(abs(d1 - d0), abs(d2 - d0)) / max(d0, 1.0);
-    if (i0 != i1 || i0 != i2 || rel > 0.06) c *= 0.12;
+    int ids[3]; float ds[3];
+    for (int k = 0; k < 3; k++){
+      int id;
+      ds[k] = primaryDepth(fc + (k == 1 ? vec2(1.2, 0.0) : k == 2 ? vec2(0.0, 1.2) : vec2(0.0)), id);
+      ids[k] = id;
+    }
+    float rel = max(abs(ds[1] - ds[0]), abs(ds[2] - ds[0])) / max(ds[0], 1.0);
+    if (ids[0] != ids[1] || ids[0] != ids[2] || rel > 0.06) c *= 0.12;
   }
   if (!(c.r == c.r && c.g == c.g && c.b == c.b)) c = vec3(0);
   c = min(c, vec3(60.0));

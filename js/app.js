@@ -2263,4 +2263,5 @@ if (QP.get('modello')) setTimeout(async () => {
   } catch (err) { console.log('PROVA errore', err.message, err.stack); }
 }, 1500);
 requestAnimationFrame(frame);
+if (R.lite) setTimeout(() => toast('Questo dispositivo usa la versione ridotta del render: forme speciali e modelli 3D non compaiono nel Render'), 1500);
 window.__orizzonte = { state: () => S };
